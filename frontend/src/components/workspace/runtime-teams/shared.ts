@@ -4,9 +4,14 @@
 export {
   createEmptyDetails,
   getSummaryCount,
+  getTeamDetailsPollDelay,
+  isTerminalTeamStatus,
   isClaimActive,
+  mergeTeamFinalSummary,
+  mergeTeamEvents,
   normalizeTaskTitle,
   parsePathLines,
+  shouldPollTeamDetails,
   uniqueStrings,
 } from "@/components/workspace/runtime-teams/shared/details";
 

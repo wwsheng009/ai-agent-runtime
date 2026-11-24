@@ -6,6 +6,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/output"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -29,6 +30,27 @@ func TestToolCompletedEventPayloadPromotesDisplayOutput(t *testing.T) {
 	}
 	if got == payload["summary"] {
 		t.Fatal("output must not collapse back into the 3-line summary")
+	}
+}
+
+func TestToolCompletedEventPayloadPrefersCacheSafeSummaryForDisplay(t *testing.T) {
+	raw := `{"terminal":true,"summary_state":"ready","summary":"all tasks complete","next_cursor":12}`
+	displaySummary := "Team completed; final summary is ready; next_cursor=12."
+	result := toolExecutionResult{
+		Call:   types.ToolCall{ID: "call-team-wait", Name: "team_wait"},
+		Output: raw,
+		Envelope: &output.Envelope{
+			Summary:  displaySummary,
+			Metadata: map[string]interface{}{"summary_override": true},
+		},
+	}
+
+	payload := toolCompletedEventPayload(result, 1, "trace-team-wait", nil)
+	if got, _ := payload["output"].(string); got != displaySummary {
+		t.Fatalf("expected cache-safe summary as transcript output %q, got %q", displaySummary, got)
+	}
+	if result.Output != raw {
+		t.Fatalf("display projection must not mutate the structured tool result, got %q", result.Output)
 	}
 }
 

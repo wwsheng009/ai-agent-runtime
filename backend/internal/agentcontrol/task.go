@@ -13,6 +13,23 @@ import (
 // terminal result from a previous attempt).
 var ErrTaskFencingMismatch = errors.New("task fencing token mismatch")
 
+// ErrTaskFencingUnsupported reports that a workflow store cannot perform the
+// requested claim-fenced lifecycle mutation atomically. A registry must not
+// silently fall back to an unfenced write when a task carries an active claim.
+var ErrTaskFencingUnsupported = errors.New("task fencing operation unsupported")
+
+// ErrTaskVersionConflict reports that a mutation was based on a stale task
+// version. Callers should refresh the task before retrying the operation.
+var ErrTaskVersionConflict = errors.New("task version conflict")
+
+// ErrTaskVersionUnsupported reports that a workflow store cannot atomically
+// enforce the expected task version for a lifecycle mutation.
+var ErrTaskVersionUnsupported = errors.New("task version fencing unsupported")
+
+// ErrTaskLifecycleActionRequired reports that a task mutation attempted to
+// bypass the workflow's controlled lifecycle actions.
+var ErrTaskLifecycleActionRequired = errors.New("task lifecycle action required")
+
 // ErrOrchestratorOwnerMismatch reports that a claim carried an orchestrator
 // owner token that no longer matches the team's current durable owner lease.
 // The caller is a stale orchestrator instance and must stop claiming tasks and
@@ -172,10 +189,11 @@ type TaskWakeSource interface {
 // request. Workflow adapters remain responsible for mapping status strings to
 // their native task lifecycle types.
 type TaskStatusUpdateRequest struct {
-	ID       string
-	Workflow string
-	Status   string
-	Summary  string
+	ID           string
+	Workflow     string
+	Status       string
+	Summary      string
+	FencingToken string
 }
 
 // TaskCreateRequest describes task creation through the AgentControl task
@@ -301,6 +319,10 @@ type TaskRetryRequest struct {
 	Workflow string
 	Status   string
 	Summary  string
+	// ExpectedVersion fences retries to the task snapshot the caller reviewed.
+	// A zero value preserves compatibility for internal reclaim flows that use
+	// the claim fencing token instead.
+	ExpectedVersion int64
 	// FencingToken is optional. Reclaims are intentionally allowed to proceed
 	// without a token (they are the forced recovery path).
 	FencingToken string
@@ -352,6 +374,9 @@ type TaskBlockRequest struct {
 	Summary         string
 	TeammateID      string
 	SkipStateUpdate bool
+	// FencingToken pins the block transition to the current claim attempt.
+	// An empty token only matches a task which has no active claim token.
+	FencingToken string
 }
 
 // TaskRegistryStatusWriter is the first write-side AgentControl task seam.
@@ -515,6 +540,7 @@ func (r TaskStatusUpdateRequest) Normalize() TaskStatusUpdateRequest {
 	r.Workflow = strings.TrimSpace(r.Workflow)
 	r.Status = strings.TrimSpace(r.Status)
 	r.Summary = strings.TrimSpace(r.Summary)
+	r.FencingToken = strings.TrimSpace(r.FencingToken)
 	return r
 }
 
@@ -647,6 +673,7 @@ func (r TaskBlockRequest) Normalize() TaskBlockRequest {
 	r.Workflow = strings.TrimSpace(r.Workflow)
 	r.Summary = strings.TrimSpace(r.Summary)
 	r.TeammateID = strings.TrimSpace(r.TeammateID)
+	r.FencingToken = strings.TrimSpace(r.FencingToken)
 	return r
 }
 

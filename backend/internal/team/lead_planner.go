@@ -53,6 +53,19 @@ type PlanResult struct {
 	Summary      string
 }
 
+// atomicTaskPlanStore is implemented by stores that can materialize a
+// replan and fence it against the failed task version in one transaction.
+// Stores without this capability must not be used for a versioned replan.
+type atomicTaskPlanStore interface {
+	PersistTaskPlanWithVersion(
+		ctx context.Context,
+		failedTaskID string,
+		expectedVersion int64,
+		tasks []Task,
+		dependencies []TaskDependency,
+	) error
+}
+
 // InitialPlan asks the lead to produce an initial DAG plan.
 func (p *LeadPlanner) InitialPlan(ctx context.Context, team Team, goal string) (*PlanResult, error) {
 	if p == nil || p.Sessions == nil {
@@ -81,8 +94,25 @@ func (p *LeadPlanner) InitialPlan(ctx context.Context, team Team, goal string) (
 
 // ReplanOnFailure asks the lead to generate additional tasks after a failure.
 func (p *LeadPlanner) ReplanOnFailure(ctx context.Context, team Team, failed Task) (*PlanResult, error) {
+	return p.replanOnFailure(ctx, team, failed, 0)
+}
+
+// ReplanOnFailureWithVersion asks the lead to generate additional tasks after a
+// failure and atomically persists them only when the failed task still has the
+// caller's expected version.
+func (p *LeadPlanner) ReplanOnFailureWithVersion(ctx context.Context, team Team, failed Task, expectedVersion int64) (*PlanResult, error) {
+	if expectedVersion <= 0 {
+		return nil, fmt.Errorf("expected task version is required for versioned replan")
+	}
+	return p.replanOnFailure(ctx, team, failed, expectedVersion)
+}
+
+func (p *LeadPlanner) replanOnFailure(ctx context.Context, team Team, failed Task, expectedVersion int64) (*PlanResult, error) {
 	if p == nil || p.Sessions == nil {
 		return nil, fmt.Errorf("lead planner sessions are not configured")
+	}
+	if p.AutoPersist && p.Store != nil && expectedVersion <= 0 {
+		return nil, fmt.Errorf("expected task version is required for auto-persisted replan")
 	}
 	teamID := strings.TrimSpace(team.ID)
 	if teamID == "" {
@@ -90,6 +120,10 @@ func (p *LeadPlanner) ReplanOnFailure(ctx context.Context, team Team, failed Tas
 	}
 	if teamID == "" {
 		return nil, fmt.Errorf("team id is required")
+	}
+	if failedTeamID := strings.TrimSpace(failed.TeamID); failedTeamID != "" &&
+		!strings.EqualFold(failedTeamID, teamID) {
+		return nil, fmt.Errorf("failed task does not belong to team: %s", strings.TrimSpace(failed.ID))
 	}
 	leadSession := strings.TrimSpace(team.LeadSessionID)
 	if leadSession == "" {
@@ -105,7 +139,7 @@ func (p *LeadPlanner) ReplanOnFailure(ctx context.Context, team Team, failed Tas
 	if err != nil {
 		return nil, err
 	}
-	return p.materializePlan(ctx, teamID, payload)
+	return p.materializePlanWithFence(ctx, teamID, payload, failed.ID, expectedVersion)
 }
 
 // FinalSummary returns a team summary, optionally using the lead session.
@@ -234,10 +268,14 @@ func applyFinalSummarySessionError(target *FinalSummaryResult, err error) {
 }
 
 func (p *LeadPlanner) materializePlan(ctx context.Context, teamID string, payload *planPayload) (*PlanResult, error) {
+	return p.materializePlanWithFence(ctx, teamID, payload, "", 0)
+}
+
+func (p *LeadPlanner) materializePlanWithFence(ctx context.Context, teamID string, payload *planPayload, failedTaskID string, expectedVersion int64) (*PlanResult, error) {
 	if payload == nil || len(payload.Tasks) == 0 {
 		return nil, fmt.Errorf("plan payload is empty")
 	}
-	planIDMap := make(map[string]int)
+	planIDs := make(map[string]string, len(payload.Tasks))
 	tasks := make([]Task, 0, len(payload.Tasks))
 	for i, spec := range payload.Tasks {
 		id := strings.TrimSpace(spec.ID)
@@ -253,10 +291,14 @@ func (p *LeadPlanner) materializePlan(ctx context.Context, teamID string, payloa
 		if !ok {
 			return nil, fmt.Errorf("invalid task difficulty: %s", strings.TrimSpace(spec.Difficulty))
 		}
+		if _, exists := planIDs[id]; exists {
+			return nil, fmt.Errorf("duplicate plan task id: %s", id)
+		}
 		difficultyRationale := strings.TrimSpace(spec.DifficultyRationale)
 		taskType := modelrouting.NormalizeTaskType(spec.TaskType)
 		taskSubject := strings.TrimSpace(spec.TaskSubject)
 		task := Task{
+			ID:                  id,
 			TeamID:              teamID,
 			Title:               spec.Title,
 			Goal:                spec.Goal,
@@ -275,11 +317,64 @@ func (p *LeadPlanner) materializePlan(ctx context.Context, teamID string, payloa
 			assignee := strings.TrimSpace(spec.Assignee)
 			task.Assignee = &assignee
 		}
-		planIDMap[id] = len(tasks)
+		planIDs[id] = id
 		tasks = append(tasks, task)
 	}
 
-	idMap := make(map[string]string)
+	dependencies := make([]TaskDependency, 0, len(payload.Dependencies))
+	for _, dep := range payload.Dependencies {
+		rawTaskID := strings.TrimSpace(dep.Task)
+		rawDependsOnID := strings.TrimSpace(dep.DependsOn)
+		if rawTaskID == "" || rawDependsOnID == "" {
+			return nil, fmt.Errorf("plan dependency task and depends_on ids are required")
+		}
+		taskID := resolvePlanID(rawTaskID, planIDs)
+		if taskID == "" {
+			return nil, fmt.Errorf("plan dependency task is not in the generated plan: %s", rawTaskID)
+		}
+		depID := resolvePlanID(rawDependsOnID, planIDs)
+		if depID == "" {
+			return nil, fmt.Errorf("plan dependency prerequisite is not in the generated plan: %s", rawDependsOnID)
+		}
+		dependencies = append(dependencies, TaskDependency{
+			TaskID:      taskID,
+			DependsOnID: depID,
+		})
+	}
+
+	if p.Store != nil && p.AutoPersist && expectedVersion > 0 {
+		if atomicStore, ok := p.Store.(atomicTaskPlanStore); ok {
+			if strings.TrimSpace(failedTaskID) == "" {
+				return nil, fmt.Errorf("failed task id is required for versioned replan")
+			}
+			if err := atomicStore.PersistTaskPlanWithVersion(
+				ctx,
+				strings.TrimSpace(failedTaskID),
+				expectedVersion,
+				tasks,
+				dependencies,
+			); err != nil {
+				return nil, err
+			}
+			for i := range tasks {
+				persisted, err := p.Store.GetTask(ctx, tasks[i].ID)
+				if err != nil {
+					return nil, fmt.Errorf("reload persisted replan task %s: %w", tasks[i].ID, err)
+				}
+				if persisted == nil {
+					return nil, fmt.Errorf("persisted replan task not found: %s", tasks[i].ID)
+				}
+				tasks[i] = *persisted
+			}
+			return &PlanResult{
+				Tasks:        tasks,
+				Dependencies: dependencies,
+				Summary:      strings.TrimSpace(payload.Summary),
+			}, nil
+		}
+		return nil, agentcontrol.ErrTaskVersionUnsupported
+	}
+
 	if p.Store != nil && p.AutoPersist {
 		taskWriter := NewAgentControlTaskRegistry(p.Store)
 		for i := range tasks {
@@ -291,6 +386,7 @@ func (p *LeadPlanner) materializePlan(ctx context.Context, teamID string, payloa
 				ID:                  tasks[i].ID,
 				Workflow:            agentcontrol.WorkflowSpawnTeam,
 				TeamID:              tasks[i].TeamID,
+				ParentTaskID:        derefString(tasks[i].ParentTaskID),
 				Title:               tasks[i].Title,
 				Goal:                tasks[i].Goal,
 				Difficulty:          tasks[i].Difficulty,
@@ -312,42 +408,24 @@ func (p *LeadPlanner) materializePlan(ctx context.Context, teamID string, payloa
 			if created == nil {
 				return nil, fmt.Errorf("agent control task create returned nil record")
 			}
-			id := created.ID
-			planID := planKeyAtIndex(planIDMap, i)
-			if planID != "" {
-				idMap[planID] = id
-			}
-			tasks[i].ID = id
+			tasks[i].ID = created.ID
 		}
 	}
 
-	dependencies := make([]TaskDependency, 0, len(payload.Dependencies))
 	var dependencyWriter AgentControlTaskRegistry
 	if p.Store != nil && p.AutoPersist {
 		dependencyWriter = NewAgentControlTaskRegistry(p.Store)
 	}
-	for _, dep := range payload.Dependencies {
-		taskKey := strings.TrimSpace(dep.Task)
-		depKey := strings.TrimSpace(dep.DependsOn)
-		if taskKey == "" || depKey == "" {
-			continue
-		}
-		taskID := resolvePlanID(taskKey, idMap)
-		depID := resolvePlanID(depKey, idMap)
-		if taskID == "" || depID == "" {
-			continue
-		}
-		dependencies = append(dependencies, TaskDependency{
-			TaskID:      taskID,
-			DependsOnID: depID,
-		})
+	for i := range dependencies {
 		if p.Store != nil && p.AutoPersist {
-			_ = dependencyWriter.CreateAgentControlTaskDependency(ctx, agentcontrol.TaskDependencyCreateRequest{
+			if err := dependencyWriter.CreateAgentControlTaskDependency(ctx, agentcontrol.TaskDependencyCreateRequest{
 				Workflow:    agentcontrol.WorkflowSpawnTeam,
 				TeamID:      teamID,
-				TaskID:      taskID,
-				DependsOnID: depID,
-			})
+				TaskID:      dependencies[i].TaskID,
+				DependsOnID: dependencies[i].DependsOnID,
+			}); err != nil {
+				return nil, fmt.Errorf("persist task dependency %s -> %s: %w", dependencies[i].TaskID, dependencies[i].DependsOnID, err)
+			}
 		}
 	}
 	return &PlanResult{
@@ -527,11 +605,9 @@ func resolvePlanID(planID string, mapIDs map[string]string) string {
 	return ""
 }
 
-func planKeyAtIndex(mapping map[string]int, index int) string {
-	for key, value := range mapping {
-		if value == index {
-			return key
-		}
+func derefString(value *string) string {
+	if value == nil {
+		return ""
 	}
-	return ""
+	return strings.TrimSpace(*value)
 }

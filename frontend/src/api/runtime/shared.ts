@@ -3,13 +3,38 @@ import type { RuntimeErrorPayload } from "@/types/runtime";
 export class RuntimeApiError extends Error {
   readonly status: number;
   readonly payload: RuntimeErrorPayload | null;
+  readonly retryAfterMs: number | null;
 
-  constructor(status: number, payload: RuntimeErrorPayload | null) {
+  constructor(
+    status: number,
+    payload: RuntimeErrorPayload | null,
+    headers?: Headers | null,
+  ) {
     super(buildErrorMessage(status, payload));
     this.name = "RuntimeApiError";
     this.status = status;
     this.payload = payload;
+    this.retryAfterMs = parseRetryAfterMs(headers);
   }
+}
+
+/**
+ * Preserve the server's retry hint so polling callers can back off without
+ * guessing from the response body. Retry-After accepts either delta-seconds
+ * or an HTTP date; an elapsed date is represented as zero rather than being
+ * discarded.
+ */
+function parseRetryAfterMs(headers?: Headers | null): number | null {
+  const value = headers?.get("Retry-After")?.trim();
+  if (!value) {
+    return null;
+  }
+  if (/^\d+(?:\.\d+)?$/.test(value)) {
+    const seconds = Number(value);
+    return Number.isFinite(seconds) ? Math.max(0, Math.ceil(seconds * 1000)) : null;
+  }
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? Math.max(0, timestamp - Date.now()) : null;
 }
 
 /**
@@ -320,7 +345,7 @@ async function performRuntimeJsonFetch<T>(
   const response = await fetch(input, effectiveInit);
   if (!response.ok) {
     const payload = await parseErrorPayload(response);
-    const error = new RuntimeApiError(response.status, payload);
+    const error = new RuntimeApiError(response.status, payload, response.headers);
     if (
       response.status === 401 &&
       readErrorEnvelope(payload).code === "API_UNAUTHORIZED" &&

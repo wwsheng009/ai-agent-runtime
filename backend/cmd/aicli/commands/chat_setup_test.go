@@ -1969,12 +1969,19 @@ func TestComposeLocalChatSystemPrompt_IncludesWorkspaceGuidance(t *testing.T) {
 		"Team collaboration tools such as team_task_spec, team_task_context, team_send, team_mailbox, team_task_report, and team_task_block require an active team run. Ordinary subagent_spawn children only support completion_requirement=none; use team_spawn or a Team assignment when a structured complete_task outcome is required.",
 		`When calling team tools, leave teammate session_id unset unless you truly need a fixed explicit session. Never use session_id="current" for teammates.`,
 		"When calling team_spawn from the current chat, do not set lead_session_id unless the user explicitly asked for a different lead session. The current session will be used automatically.",
-		"When you call team_spawn with auto_start=true, treat the delegated work as already in progress. Do not ask the user to choose the next step while the team is running; instead briefly state that the team is working in the background and that you will summarize when it finishes.",
-		"After team_spawn auto_start=true, call team_wait with the returned team_id to wait for durable team.completed/team.summary.",
+		"When team_spawn returns auto_start=true, inspect start_result.status and capabilities",
+		"lifecycle_sync_requested means only that the host Team lifecycle sync was requested, not that a worker is ready or executing",
+		"Do not claim work is underway unless persisted Runtime state/events confirm it.",
+		"When lifecycle_sync_requested is returned, use team_wait with the returned team_id",
+		"continue with its next_cursor, and distinguish Team terminal state from summary readiness.",
+		"If start_result is unavailable, report that execution was not triggered",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("expected system prompt to contain %q, got %q", want, got)
 		}
+	}
+	if strings.Contains(got, "delegated work as already in progress") {
+		t.Fatalf("system prompt must not assume auto_start started execution, got %q", got)
 	}
 	gotLower := strings.ToLower(got)
 	// PowerShell 专项建议只在 Windows 分支渲染（internal/prompt/environment_context.go

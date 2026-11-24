@@ -6,23 +6,18 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 )
 
 func TestLeaseManagerReclaimExpiredTasks(t *testing.T) {
 	ctx := context.Background()
-	store := newTestStore(t)
-
-	teamID, err := store.CreateTeam(ctx, Team{})
-	require.NoError(t, err)
-
-	assignee := "mate-a"
+	store, teamID, taskID, claim := setupFencedTask(t, false)
 	leaseUntil := time.Now().UTC().Add(-1 * time.Minute)
-	taskID, err := store.CreateTask(ctx, Task{
-		TeamID:     teamID,
-		Title:      "expired",
-		Status:     TaskStatusRunning,
-		Assignee:   &assignee,
-		LeaseUntil: &leaseUntil,
+	_, err := NewAgentControlTaskRegistry(store).RenewAgentControlTaskLease(ctx, agentcontrol.TaskLeaseRenewRequest{
+		ID:           taskID,
+		Workflow:     agentcontrol.WorkflowSpawnTeam,
+		LeaseUntil:   leaseUntil,
+		FencingToken: claim.FencingToken,
 	})
 	require.NoError(t, err)
 
@@ -58,19 +53,13 @@ func TestLeaseManagerReclaimExpiredTasks(t *testing.T) {
 
 func TestLeaseManagerReclaimGraceProtectsHealthyTasks(t *testing.T) {
 	ctx := context.Background()
-	store := newTestStore(t)
-
-	teamID, err := store.CreateTeam(ctx, Team{})
-	require.NoError(t, err)
-
-	assignee := "mate-a"
+	store, teamID, taskID, claim := setupFencedTask(t, false)
 	leaseUntil := time.Now().UTC().Add(-1 * time.Minute)
-	taskID, err := store.CreateTask(ctx, Task{
-		TeamID:     teamID,
-		Title:      "expired",
-		Status:     TaskStatusRunning,
-		Assignee:   &assignee,
-		LeaseUntil: &leaseUntil,
+	_, err := NewAgentControlTaskRegistry(store).RenewAgentControlTaskLease(ctx, agentcontrol.TaskLeaseRenewRequest{
+		ID:           taskID,
+		Workflow:     agentcontrol.WorkflowSpawnTeam,
+		LeaseUntil:   leaseUntil,
+		FencingToken: claim.FencingToken,
 	})
 	require.NoError(t, err)
 

@@ -4,7 +4,9 @@ import { RuntimeTeamFinalSummarySection } from "./runtime-team-details-panel/fin
 import { createInitialOpenSections } from "./runtime-team-details-panel/format";
 import { RuntimeTeamMailboxSection } from "./runtime-team-details-panel/mailbox-section";
 import { RuntimeTeamPathClaimsSection } from "./runtime-team-details-panel/path-claims-section";
+import { RuntimeTeamPreflightSection } from "./runtime-team-details-panel/preflight-section";
 import { RuntimeTeamRosterSection } from "./runtime-team-details-panel/roster-section";
+import { RuntimeTeamResultsSection } from "./runtime-team-details-panel/results-section";
 import { RuntimeTeamTaskQueueSection } from "./runtime-team-details-panel/task-queue-section";
 import { RuntimeTeamSnapshot } from "./runtime-team-details-panel/team-snapshot";
 import { RuntimeTeamTimelineSection } from "./runtime-team-details-panel/timeline-section";
@@ -88,6 +90,12 @@ function RuntimeTeamDetailsPanelBody({
         visibleTasks={visibleTasks}
       />
 
+      <RuntimeTeamPreflightSection
+        details={details}
+        onToggle={() => toggleSection("preflight")}
+        open={openSections.preflight}
+      />
+
       <RuntimeTeamMailboxSection
         ackingMessageId={ackingMessageId}
         details={details}
@@ -130,6 +138,13 @@ function RuntimeTeamDetailsPanelBody({
         onToggle={() => toggleSection("timeline")}
         open={openSections.timeline}
         visibleEvents={visibleEvents}
+      />
+
+      <RuntimeTeamResultsSection
+        details={details}
+        onToggle={() => toggleSection("results")}
+        open={openSections.results}
+        visibleTasks={visibleTasks}
       />
 
       <RuntimeTeamFinalSummarySection

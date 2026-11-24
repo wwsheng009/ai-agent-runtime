@@ -58,8 +58,9 @@ func (s *SQLiteStore) ReconcileFailedTaskDependencies(ctx context.Context, teamI
 			}
 			if failure.Assignee != "" {
 				if _, err := tx.ExecContext(ctx, `
-					UPDATE teammates SET state = ?, updated_at = ? WHERE id = ?
-				`, string(TeammateStateIdle), formatTime(now), failure.Assignee); err != nil {
+					UPDATE teammates SET state = ?, updated_at = ?
+					WHERE id = ? AND team_id = ?
+				`, string(TeammateStateIdle), formatTime(now), failure.Assignee, teamID); err != nil {
 					return fmt.Errorf("release dependency-blocked teammate: %w", err)
 				}
 			}

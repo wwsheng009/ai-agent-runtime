@@ -4,7 +4,10 @@ import {
   buildDispatchComparisonRows,
   formatDispatchOutcomeLabel,
   getDispatchOutcomeNarrative,
+  getTeamDetailsPollDelay,
   isTerminalDispatchStatus,
+  mergeTeamFinalSummary,
+  mergeTeamEvents,
   normalizeDispatchOutcomeKey,
   normalizeTaskTitle,
   resolveDispatchRolePlan,
@@ -12,6 +15,7 @@ import {
   sortDispatchComparisonRows,
   summarizeDispatchBatch,
   sortDispatchMonitor,
+  shouldPollTeamDetails,
 } from "@/components/workspace/runtime-teams/shared";
 
 describe("runtime teams shared helpers", () => {
@@ -31,6 +35,118 @@ describe("runtime teams shared helpers", () => {
     expect(
       normalizeTaskTitle("", "a".repeat(80)),
     ).toBe(`${"a".repeat(69)}...`);
+  });
+
+  it("keeps the last known summary while preserving explicit summary state", () => {
+    expect(
+      mergeTeamFinalSummary(
+        { finalSummary: "previous summary", summaryState: "ready" },
+        undefined,
+      ),
+    ).toEqual({
+      finalSummary: "previous summary",
+      summaryState: "ready",
+    });
+
+    expect(
+      mergeTeamFinalSummary(
+        { finalSummary: "previous summary", summaryState: "ready" },
+        { team_id: "team-1", summary: "  still generating  ", summary_state: "pending" },
+      ),
+    ).toEqual({
+      finalSummary: "still generating",
+      summaryState: "pending",
+    });
+
+    expect(
+      mergeTeamFinalSummary(
+        { finalSummary: "last completed summary", summaryState: "ready" },
+        { team_id: "team-1", summary: "", summary_state: "pending" },
+      ),
+    ).toEqual({
+      finalSummary: "last completed summary",
+      summaryState: "pending",
+    });
+
+    expect(
+      mergeTeamFinalSummary(
+        { finalSummary: "last completed summary", summaryState: "ready" },
+        { team_id: "team-1", summary: "" },
+      ),
+    ).toEqual({
+      finalSummary: "last completed summary",
+      summaryState: "ready",
+    });
+
+    expect(
+      mergeTeamFinalSummary(
+        { finalSummary: "last completed summary", summaryState: "ready" },
+        { team_id: "team-1", summary: "", summary_state: "unknown" },
+      ),
+    ).toEqual({
+      finalSummary: "last completed summary",
+      summaryState: "ready",
+    });
+
+    expect(
+      mergeTeamFinalSummary(
+        { finalSummary: "last completed summary", summaryState: "ready" },
+        { team_id: "team-1", summary: "", summary_state: "ready" },
+      ),
+    ).toEqual({
+      finalSummary: "",
+      summaryState: "ready",
+    });
+  });
+
+  it("merges team events by team-local sequence without duplicating prior events", () => {
+    const existing = [
+      {
+        seq: 3,
+        type: "team.completed",
+        team_id: "team-1",
+        timestamp: "2026-11-22T00:00:03Z",
+      },
+      {
+        seq: 1,
+        type: "team.started",
+        team_id: "team-1",
+        timestamp: "2026-11-22T00:00:01Z",
+      },
+    ];
+    const incoming = [
+      {
+        seq: 3,
+        type: "team.completed",
+        team_id: "team-1",
+        timestamp: "2026-11-22T00:00:03Z",
+      },
+      {
+        seq: 2,
+        type: "task.completed",
+        team_id: "team-1",
+        timestamp: "2026-11-22T00:00:02Z",
+      },
+    ];
+
+    expect(mergeTeamEvents(existing, incoming).map((event) => event.seq)).toEqual([
+      3, 2, 1,
+    ]);
+  });
+
+  it("keeps the details monitor read-only and polls terminal summaries only briefly", () => {
+    expect(shouldPollTeamDetails("active", "unknown")).toBe(true);
+    expect(shouldPollTeamDetails("running", "ready")).toBe(true);
+    expect(shouldPollTeamDetails("done", "pending")).toBe(true);
+    expect(shouldPollTeamDetails("done", "ready")).toBe(false);
+    expect(shouldPollTeamDetails("failed", "failed")).toBe(false);
+    expect(shouldPollTeamDetails("done", "unknown", 8)).toBe(false);
+    expect(shouldPollTeamDetails("unknown", "pending")).toBe(false);
+
+    expect(getTeamDetailsPollDelay("active", "unknown", 0)).toBe(1_000);
+    expect(getTeamDetailsPollDelay("active", "unknown", 3)).toBe(8_000);
+    expect(getTeamDetailsPollDelay("active", "unknown", 99)).toBe(8_000);
+    expect(getTeamDetailsPollDelay("done", "pending", 0)).toBe(2_000);
   });
 
   it("sorts dispatch monitor entries by latest update and identifies terminal states", () => {

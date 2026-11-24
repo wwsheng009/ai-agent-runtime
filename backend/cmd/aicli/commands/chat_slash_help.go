@@ -53,6 +53,10 @@ func buildChatSlashHelpLines() []string {
 
 	lines = append(lines,
 		"",
+	)
+	lines = append(lines, chatTeamWorkflowHelpLines()...)
+	lines = append(lines,
+		"",
 		"Shell 命令:",
 		"  ![--output-bytes-cap <bytes> | --disable-output-cap] <命令>",
 		"                    - 执行 shell 命令并分享输出给 AI",

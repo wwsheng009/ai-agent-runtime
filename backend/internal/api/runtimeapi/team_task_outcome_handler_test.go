@@ -3,6 +3,8 @@ package runtimeapi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -16,6 +18,12 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 )
+
+func newLoopbackTeamTestRequest(method, target string, body io.Reader) *http.Request {
+	request := httptest.NewRequest(method, target, body)
+	request.RemoteAddr = "127.0.0.1:4321"
+	return request
+}
 
 func TestCompleteTaskHandlerAcceptsStructuredOutcomeContract(t *testing.T) {
 	ctx, store, router := newTeamTaskOutcomeTestRouter(t, "file:team-outcome-complete-structured?mode=memory&cache=shared")
@@ -39,7 +47,7 @@ func TestCompleteTaskHandlerAcceptsStructuredOutcomeContract(t *testing.T) {
 	require.NoError(t, err)
 
 	body := `{"task_status":"done","summary":"artifact published","result_ref":"artifact://build-1","teammate_id":"mate-1"}`
-	req := httptest.NewRequest(http.MethodPost, "/api/runtime/teams/"+teamID+"/tasks/"+taskID+"/outcome", strings.NewReader(body))
+	req := newLoopbackTeamTestRequest(http.MethodPost, "/api/runtime/teams/"+teamID+"/tasks/"+taskID+"/outcome", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -66,6 +74,153 @@ func TestCompleteTaskHandlerAcceptsStructuredOutcomeContract(t *testing.T) {
 	require.Equal(t, team.TeamStatusDone, teamRecord.Status)
 }
 
+func TestReplanTaskRequiresAndFencesExpectedVersion(t *testing.T) {
+	ctx, store, router := newTeamTaskOutcomeTestRouter(t, "file:team-replan-version-fence?mode=memory&cache=shared")
+	teamID, err := store.CreateTeam(ctx, team.Team{LeadSessionID: "lead-session"})
+	require.NoError(t, err)
+	taskID, err := store.CreateTask(ctx, team.Task{
+		ID:     "replan-version-source",
+		TeamID: teamID,
+		Title:  "failed source",
+		Status: team.TaskStatusFailed,
+	})
+	require.NoError(t, err)
+	current, err := store.GetTask(ctx, taskID)
+	require.NoError(t, err)
+	require.NotNil(t, current)
+
+	missingVersion := newLoopbackTeamTestRequest(
+		http.MethodPost,
+		"/api/runtime/teams/"+teamID+"/tasks/"+taskID+"/replan",
+		strings.NewReader(`{"auto_persist":true}`),
+	)
+	missingVersion.Header.Set("Content-Type", "application/json")
+	missingRecorder := httptest.NewRecorder()
+	router.ServeHTTP(missingRecorder, missingVersion)
+	require.Equal(t, http.StatusBadRequest, missingRecorder.Code, missingRecorder.Body.String())
+	require.Contains(t, missingRecorder.Body.String(), "expected_version is required")
+
+	staleVersion := newLoopbackTeamTestRequest(
+		http.MethodPost,
+		"/api/runtime/teams/"+teamID+"/tasks/"+taskID+"/replan",
+		strings.NewReader(`{"expected_version":999,"auto_persist":true}`),
+	)
+	staleVersion.Header.Set("Content-Type", "application/json")
+	staleRecorder := httptest.NewRecorder()
+	router.ServeHTTP(staleRecorder, staleVersion)
+	require.Equal(t, http.StatusConflict, staleRecorder.Code, staleRecorder.Body.String())
+	require.Contains(t, staleRecorder.Body.String(), "task version conflict")
+
+	after, err := store.GetTask(ctx, taskID)
+	require.NoError(t, err)
+	require.NotNil(t, after)
+	require.Equal(t, current.Version, after.Version)
+}
+
+func TestReportTaskOutcomeRejectsClaimedTaskWithoutAttemptToken(t *testing.T) {
+	ctx, store, router := newTeamTaskOutcomeTestRouter(t, "file:team-outcome-requires-token?mode=memory&cache=shared")
+
+	teamID, err := store.CreateTeam(ctx, team.Team{})
+	require.NoError(t, err)
+	_, err = store.UpsertTeammate(ctx, team.Teammate{
+		ID:        "mate-1",
+		TeamID:    teamID,
+		SessionID: "mate-session-1",
+		State:     team.TeammateStateIdle,
+	})
+	require.NoError(t, err)
+	taskID, err := store.CreateTask(ctx, team.Task{
+		TeamID: teamID,
+		Title:  "claimed outcome",
+		Status: team.TaskStatusReady,
+	})
+	require.NoError(t, err)
+	task, err := store.GetTask(ctx, taskID)
+	require.NoError(t, err)
+	require.NotNil(t, task)
+
+	claim, claimed, err := team.NewAgentControlTaskRegistry(store).ClaimAgentControlTask(ctx, agentcontrol.TaskClaimRequest{
+		ID:              taskID,
+		Workflow:        agentcontrol.WorkflowSpawnTeam,
+		TeamID:          teamID,
+		Assignee:        "mate-1",
+		ExpectedVersion: task.Version,
+		LeaseUntil:      time.Now().UTC().Add(time.Minute),
+	})
+	require.NoError(t, err)
+	require.True(t, claimed)
+	require.NotNil(t, claim)
+	require.NotEmpty(t, claim.FencingToken)
+
+	request := newLoopbackTeamTestRequest(
+		http.MethodPost,
+		"/api/runtime/teams/"+teamID+"/tasks/"+taskID+"/outcome",
+		strings.NewReader(`{"task_status":"done","summary":"missing token"}`),
+	)
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	require.Equal(t, http.StatusConflict, recorder.Code)
+
+	unchanged, err := store.GetTask(ctx, taskID)
+	require.NoError(t, err)
+	require.NotNil(t, unchanged)
+	require.Equal(t, team.TaskStatusRunning, unchanged.Status)
+	require.Equal(t, claim.FencingToken, unchanged.FencingToken)
+
+	for _, binding := range []struct {
+		name   string
+		teamID string
+		taskID string
+	}{
+		{name: "wrong team", teamID: "another-team", taskID: taskID},
+		{name: "wrong task", teamID: teamID, taskID: "another-task"},
+	} {
+		t.Run(binding.name, func(t *testing.T) {
+			request := newLoopbackTeamTestRequest(
+				http.MethodPost,
+				"/api/runtime/teams/"+teamID+"/tasks/"+taskID+"/outcome",
+				strings.NewReader(`{"task_status":"done","summary":"misbound run"}`),
+			)
+			request.Header.Set("Content-Type", "application/json")
+			request = request.WithContext(team.WithRunMeta(request.Context(), &team.RunMeta{
+				Team: &team.TeamRunMeta{
+					TeamID:        binding.teamID,
+					AgentID:       "mate-1",
+					CurrentTaskID: binding.taskID,
+					FencingToken:  claim.FencingToken,
+				},
+			}))
+			recorder := httptest.NewRecorder()
+			router.ServeHTTP(recorder, request)
+			require.Equal(t, http.StatusConflict, recorder.Code)
+		})
+	}
+
+	request = newLoopbackTeamTestRequest(
+		http.MethodPost,
+		"/api/runtime/teams/"+teamID+"/tasks/"+taskID+"/outcome",
+		strings.NewReader(`{"task_status":"done","summary":"authorized by bound run"}`),
+	)
+	request.Header.Set("Content-Type", "application/json")
+	request = request.WithContext(team.WithRunMeta(request.Context(), &team.RunMeta{
+		Team: &team.TeamRunMeta{
+			TeamID:        teamID,
+			AgentID:       "mate-1",
+			CurrentTaskID: taskID,
+			FencingToken:  claim.FencingToken,
+		},
+	}))
+	recorder = httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	require.Equal(t, http.StatusOK, recorder.Code)
+
+	updated, err := store.GetTask(ctx, taskID)
+	require.NoError(t, err)
+	require.NotNil(t, updated)
+	require.Equal(t, team.TaskStatusDone, updated.Status)
+}
+
 func TestReportTaskOutcomeHandlerAcceptsMinimalDonePayload(t *testing.T) {
 	ctx, store, router := newTeamTaskOutcomeTestRouter(t, "file:team-outcome-complete-legacy?mode=memory&cache=shared")
 
@@ -78,7 +233,7 @@ func TestReportTaskOutcomeHandlerAcceptsMinimalDonePayload(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/runtime/teams/"+teamID+"/tasks/"+taskID+"/outcome", strings.NewReader(`{"task_status":"done","summary":"legacy complete"}`))
+	req := newLoopbackTeamTestRequest(http.MethodPost, "/api/runtime/teams/"+teamID+"/tasks/"+taskID+"/outcome", strings.NewReader(`{"task_status":"done","summary":"legacy complete"}`))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -104,7 +259,7 @@ func TestReportTaskOutcomeHandlerUsesCanonicalHeaders(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/runtime/teams/"+teamID+"/tasks/"+taskID+"/outcome", strings.NewReader(`{"task_status":"done","summary":"legacy complete"}`))
+	req := newLoopbackTeamTestRequest(http.MethodPost, "/api/runtime/teams/"+teamID+"/tasks/"+taskID+"/outcome", strings.NewReader(`{"task_status":"done","summary":"legacy complete"}`))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -144,7 +299,7 @@ func TestBlockTaskHandlerAcceptsStructuredHandoffOutcome(t *testing.T) {
 	require.NoError(t, err)
 
 	body := `{"task_status":"handoff","summary":"pass to reviewer","blocker":"need review","handoff_to":"mate-2","teammate_id":"mate-1","auto_replan":false}`
-	req := httptest.NewRequest(http.MethodPost, "/api/runtime/teams/"+teamID+"/tasks/"+taskID+"/outcome", strings.NewReader(body))
+	req := newLoopbackTeamTestRequest(http.MethodPost, "/api/runtime/teams/"+teamID+"/tasks/"+taskID+"/outcome", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -206,7 +361,7 @@ func TestReportTaskOutcomeRouteSupportsCanonicalStatuses(t *testing.T) {
 			})
 			require.NoError(t, err)
 
-			req := httptest.NewRequest(http.MethodPost, "/api/runtime/teams/"+teamID+"/tasks/"+taskID+"/outcome", strings.NewReader(tc.body))
+			req := newLoopbackTeamTestRequest(http.MethodPost, "/api/runtime/teams/"+teamID+"/tasks/"+taskID+"/outcome", strings.NewReader(tc.body))
 			req.Header.Set("Content-Type", "application/json")
 			rec := httptest.NewRecorder()
 			router.ServeHTTP(rec, req)
@@ -233,7 +388,7 @@ func TestBlockTaskHandlerRejectsInvalidStructuredOutcome(t *testing.T) {
 	require.NoError(t, err)
 
 	body := `{"task_status":"handoff","summary":"pass to reviewer","blocker":"need review","auto_replan":false}`
-	req := httptest.NewRequest(http.MethodPost, "/api/runtime/teams/"+teamID+"/tasks/"+taskID+"/outcome", strings.NewReader(body))
+	req := newLoopbackTeamTestRequest(http.MethodPost, "/api/runtime/teams/"+teamID+"/tasks/"+taskID+"/outcome", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -264,7 +419,7 @@ func TestReportTaskOutcomeHandlerSupportsStructuredFailedOutcome(t *testing.T) {
 	require.NoError(t, err)
 
 	body := `{"task_status":"failed","summary":"tests failed","blocker":"nil token case","result_ref":"log://task-1","teammate_id":"mate-1"}`
-	req := httptest.NewRequest(http.MethodPost, "/api/runtime/teams/"+teamID+"/tasks/"+taskID+"/outcome", strings.NewReader(body))
+	req := newLoopbackTeamTestRequest(http.MethodPost, "/api/runtime/teams/"+teamID+"/tasks/"+taskID+"/outcome", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -294,7 +449,7 @@ func TestReportTaskOutcomeHandlerAddsCanonicalRouteHeaders(t *testing.T) {
 	require.NoError(t, err)
 
 	body := `{"task_status":"done","summary":"finished"}`
-	req := httptest.NewRequest(http.MethodPost, "/api/runtime/teams/"+teamID+"/tasks/"+taskID+"/outcome", strings.NewReader(body))
+	req := newLoopbackTeamTestRequest(http.MethodPost, "/api/runtime/teams/"+teamID+"/tasks/"+taskID+"/outcome", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -319,7 +474,7 @@ func TestReportTaskOutcomeHandlerRejectsMissingStructuredStatus(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/runtime/teams/"+teamID+"/tasks/"+taskID+"/outcome", strings.NewReader(`{"summary":"legacy body not allowed here"}`))
+	req := newLoopbackTeamTestRequest(http.MethodPost, "/api/runtime/teams/"+teamID+"/tasks/"+taskID+"/outcome", strings.NewReader(`{"summary":"legacy body not allowed here"}`))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -334,7 +489,7 @@ func TestCreateTaskUsesAgentControlTaskCreateWriter(t *testing.T) {
 	teamID, err := store.CreateTeam(ctx, team.Team{})
 	require.NoError(t, err)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/runtime/teams/"+teamID+"/tasks", strings.NewReader(`{"id":"task-create-api","title":"create through api","goal":"verify create","difficulty":"hard","difficulty_rationale":"API create metadata path.","status":"ready","priority":5,"assignee":"mate-1","read_paths":["docs"],"write_paths":["docs/plan"],"deliverables":["summary"],"summary":"created through agentcontrol"}`))
+	req := newLoopbackTeamTestRequest(http.MethodPost, "/api/runtime/teams/"+teamID+"/tasks", strings.NewReader(`{"id":"task-create-api","title":"create through api","goal":"verify create","difficulty":"hard","difficulty_rationale":"API create metadata path.","status":"ready","priority":5,"assignee":"mate-1","read_paths":["docs"],"write_paths":["docs/plan"],"deliverables":["summary"],"summary":"created through agentcontrol"}`))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -381,7 +536,7 @@ func TestCreateTaskRejectsInvalidDifficulty(t *testing.T) {
 	teamID, err := store.CreateTeam(ctx, team.Team{})
 	require.NoError(t, err)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/runtime/teams/"+teamID+"/tasks", strings.NewReader(`{"id":"task-create-invalid","title":"bad difficulty","difficulty":"extreme"}`))
+	req := newLoopbackTeamTestRequest(http.MethodPost, "/api/runtime/teams/"+teamID+"/tasks", strings.NewReader(`{"id":"task-create-invalid","title":"bad difficulty","difficulty":"extreme"}`))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -407,8 +562,8 @@ func TestUpdateTaskUsesAgentControlTaskUpdateWriter(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	body := `{"title":"patched through api","status":"ready","priority":9,"assignee":"mate-1","read_paths":["docs"],"summary":"updated through agentcontrol"}`
-	req := httptest.NewRequest(http.MethodPatch, "/api/runtime/teams/"+teamID+"/tasks/"+taskID, strings.NewReader(body))
+	body := `{"title":"patched through api","priority":9,"assignee":"mate-1","read_paths":["docs"],"summary":"updated through agentcontrol"}`
+	req := newLoopbackTeamTestRequest(http.MethodPatch, "/api/runtime/teams/"+teamID+"/tasks/"+taskID, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -420,7 +575,7 @@ func TestUpdateTaskUsesAgentControlTaskUpdateWriter(t *testing.T) {
 	}
 	require.NoError(t, decodeJSONResponse(rec, &resp))
 	require.Equal(t, "patched through api", resp.Task.Title)
-	require.Equal(t, team.TaskStatusReady, resp.Task.Status)
+	require.Equal(t, team.TaskStatusPending, resp.Task.Status)
 	require.Equal(t, 9, resp.Task.Priority)
 	require.NotNil(t, resp.Task.Assignee)
 	require.Equal(t, "mate-1", *resp.Task.Assignee)
@@ -430,7 +585,7 @@ func TestUpdateTaskUsesAgentControlTaskUpdateWriter(t *testing.T) {
 	records, err := team.NewAgentControlTaskRegistry(store).ListAgentControlTasks(ctx, agentcontrol.TaskFilter{
 		Workflow: agentcontrol.WorkflowSpawnTeam,
 		TeamID:   teamID,
-		Status:   []string{string(team.TaskStatusReady)},
+		Status:   []string{string(team.TaskStatusPending)},
 	})
 	require.NoError(t, err)
 	require.Len(t, records, 1)
@@ -451,8 +606,8 @@ func TestUpdateAgentControlTaskEndpointUsesTaskUpdateWriter(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	body := `{"workflow":"spawn_team","team_id":"` + teamID + `","title":"patched control title","difficulty":"hard","difficulty_rationale":"requires shared context review","status":"ready","summary":"patched through control endpoint"}`
-	req := httptest.NewRequest(http.MethodPatch, "/api/runtime/agent-control/tasks/"+taskID, strings.NewReader(body))
+	body := `{"workflow":"spawn_team","team_id":"` + teamID + `","title":"patched control title","difficulty":"hard","difficulty_rationale":"requires shared context review","summary":"patched through control endpoint"}`
+	req := newLoopbackTeamTestRequest(http.MethodPatch, "/api/runtime/agent-control/tasks/"+taskID, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -464,7 +619,7 @@ func TestUpdateAgentControlTaskEndpointUsesTaskUpdateWriter(t *testing.T) {
 	}
 	require.NoError(t, decodeJSONResponse(rec, &resp))
 	require.Equal(t, taskID, resp.Task.ID)
-	require.Equal(t, "ready", resp.Task.Status)
+	require.Equal(t, "pending", resp.Task.Status)
 	require.Equal(t, "patched control title", resp.Task.Title)
 	require.Equal(t, "hard", resp.Task.Difficulty)
 	require.Equal(t, "requires shared context review", resp.Task.DifficultyRationale)
@@ -473,11 +628,60 @@ func TestUpdateAgentControlTaskEndpointUsesTaskUpdateWriter(t *testing.T) {
 	updated, err := store.GetTask(ctx, taskID)
 	require.NoError(t, err)
 	require.NotNil(t, updated)
-	require.Equal(t, team.TaskStatusReady, updated.Status)
+	require.Equal(t, team.TaskStatusPending, updated.Status)
 	require.Equal(t, "patched control title", updated.Title)
 	require.Equal(t, team.TaskDifficultyHard, updated.Difficulty)
 	require.Equal(t, "requires shared context review", updated.DifficultyRationale)
 	require.Equal(t, "patched through control endpoint", updated.Summary)
+}
+
+func TestTaskPatchRejectsLifecycleStatusTransition(t *testing.T) {
+	ctx, store, router := newTeamTaskOutcomeTestRouter(t, "file:team-task-patch-lifecycle-conflict?mode=memory&cache=shared")
+
+	teamID, err := store.CreateTeam(ctx, team.Team{})
+	require.NoError(t, err)
+	teamTaskID, err := store.CreateTask(ctx, team.Task{
+		TeamID: teamID,
+		Title:  "team task",
+		Status: team.TaskStatusPending,
+	})
+	require.NoError(t, err)
+	controlTaskID, err := store.CreateTask(ctx, team.Task{
+		TeamID: teamID,
+		Title:  "control task",
+		Status: team.TaskStatusPending,
+	})
+	require.NoError(t, err)
+
+	requests := []struct {
+		path string
+		body string
+		id   string
+	}{
+		{
+			path: "/api/runtime/teams/" + teamID + "/tasks/" + teamTaskID,
+			body: `{"status":"ready"}`,
+			id:   teamTaskID,
+		},
+		{
+			path: "/api/runtime/agent-control/tasks/" + controlTaskID,
+			body: `{"workflow":"spawn_team","team_id":"` + teamID + `","status":"ready"}`,
+			id:   controlTaskID,
+		},
+	}
+	for _, tc := range requests {
+		req := newLoopbackTeamTestRequest(http.MethodPatch, tc.path, strings.NewReader(tc.body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+
+		require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+		require.Contains(t, rec.Body.String(), "lifecycle action")
+		task, err := store.GetTask(ctx, tc.id)
+		require.NoError(t, err)
+		require.NotNil(t, task)
+		require.Equal(t, team.TaskStatusPending, task.Status)
+	}
 }
 
 func TestUpdateAgentControlTaskEndpointRejectsInvalidDifficulty(t *testing.T) {
@@ -493,7 +697,7 @@ func TestUpdateAgentControlTaskEndpointRejectsInvalidDifficulty(t *testing.T) {
 	require.NoError(t, err)
 
 	body := `{"workflow":"spawn_team","team_id":"` + teamID + `","difficulty":"impossible"}`
-	req := httptest.NewRequest(http.MethodPatch, "/api/runtime/agent-control/tasks/"+taskID, strings.NewReader(body))
+	req := newLoopbackTeamTestRequest(http.MethodPatch, "/api/runtime/agent-control/tasks/"+taskID, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -531,7 +735,7 @@ func TestUpdateTaskTerminalStatusesReleaseLease(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	req := httptest.NewRequest(http.MethodPatch, "/api/runtime/teams/"+teamID+"/tasks/"+legacyTaskID, strings.NewReader(`{"status":"done","assignee":"mate-2","summary":"legacy done"}`))
+	req := newLoopbackTeamTestRequest(http.MethodPost, "/api/runtime/agent-control/tasks/"+legacyTaskID+"/terminal", strings.NewReader(`{"team_id":"`+teamID+`","status":"done","summary":"legacy done"}`))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -545,7 +749,7 @@ func TestUpdateTaskTerminalStatusesReleaseLease(t *testing.T) {
 	require.Nil(t, legacyTask.Assignee)
 	require.Nil(t, legacyTask.LeaseUntil)
 
-	req = httptest.NewRequest(http.MethodPatch, "/api/runtime/agent-control/tasks/"+controlTaskID, strings.NewReader(`{"workflow":"spawn_team","team_id":"`+teamID+`","status":"failed","assignee":"mate-2","summary":"control failed"}`))
+	req = newLoopbackTeamTestRequest(http.MethodPost, "/api/runtime/agent-control/tasks/"+controlTaskID+"/terminal", strings.NewReader(`{"workflow":"spawn_team","team_id":"`+teamID+`","status":"failed","summary":"control failed"}`))
 	req.Header.Set("Content-Type", "application/json")
 	rec = httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -587,7 +791,7 @@ func TestMarkReadyTasksUsesAgentControlReadyWriter(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, store.AddTaskDependency(ctx, taskID, dependencyID))
 
-	req := httptest.NewRequest(http.MethodPost, "/api/runtime/teams/"+teamID+"/tasks/ready", nil)
+	req := newLoopbackTeamTestRequest(http.MethodPost, "/api/runtime/teams/"+teamID+"/tasks/ready", nil)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 
@@ -610,6 +814,90 @@ func TestMarkReadyTasksUsesAgentControlReadyWriter(t *testing.T) {
 	require.Equal(t, taskID, records[0].ID)
 }
 
+func TestClaimReadyTasksRejectsInactiveTeam(t *testing.T) {
+	ctx, store, router := newTeamTaskOutcomeTestRouter(
+		t,
+		"file:team-claim-ready-inactive?mode=memory&cache=shared",
+	)
+
+	teamID, err := store.CreateTeam(ctx, team.Team{Status: team.TeamStatusPaused})
+	require.NoError(t, err)
+	_, err = store.UpsertTeammate(ctx, team.Teammate{
+		ID:        "mate-paused",
+		TeamID:    teamID,
+		SessionID: "session-paused",
+		State:     team.TeammateStateIdle,
+	})
+	require.NoError(t, err)
+	taskID, err := store.CreateTask(ctx, team.Task{
+		TeamID: teamID,
+		Title:  "must remain queued",
+		Status: team.TaskStatusReady,
+	})
+	require.NoError(t, err)
+
+	req := newLoopbackTeamTestRequest(
+		http.MethodPost,
+		"/api/runtime/teams/"+teamID+"/tasks/claim",
+		strings.NewReader(`{"limit":1}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusConflict, rec.Code)
+	task, err := store.GetTask(ctx, taskID)
+	require.NoError(t, err)
+	require.NotNil(t, task)
+	require.Equal(t, team.TaskStatusReady, task.Status)
+	mate, err := store.GetTeammate(ctx, "mate-paused")
+	require.NoError(t, err)
+	require.NotNil(t, mate)
+	require.Equal(t, team.TeammateStateIdle, mate.State)
+}
+
+func TestClaimAgentControlTaskRejectsInactiveTeam(t *testing.T) {
+	ctx, store, router := newTeamTaskOutcomeTestRouter(
+		t,
+		"file:team-agentcontrol-claim-inactive?mode=memory&cache=shared",
+	)
+
+	teamID, err := store.CreateTeam(ctx, team.Team{Status: team.TeamStatusPaused})
+	require.NoError(t, err)
+	_, err = store.UpsertTeammate(ctx, team.Teammate{
+		ID:        "mate-paused",
+		TeamID:    teamID,
+		SessionID: "session-paused",
+		State:     team.TeammateStateIdle,
+	})
+	require.NoError(t, err)
+	taskID, err := store.CreateTask(ctx, team.Task{
+		TeamID: teamID,
+		Title:  "must remain queued",
+		Status: team.TaskStatusReady,
+	})
+	require.NoError(t, err)
+
+	req := newLoopbackTeamTestRequest(
+		http.MethodPost,
+		"/api/runtime/agent-control/tasks/"+taskID+"/claim",
+		strings.NewReader(`{"team_id":"`+teamID+`","assignee":"mate-paused","duration_sec":60}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusConflict, rec.Code)
+	task, err := store.GetTask(ctx, taskID)
+	require.NoError(t, err)
+	require.NotNil(t, task)
+	require.Equal(t, team.TaskStatusReady, task.Status)
+	mate, err := store.GetTeammate(ctx, "mate-paused")
+	require.NoError(t, err)
+	require.NotNil(t, mate)
+	require.Equal(t, team.TeammateStateIdle, mate.State)
+}
+
 func TestReleaseTaskLeaseUsesAgentControlTaskReleaseWriter(t *testing.T) {
 	ctx, store, router := newTeamTaskOutcomeTestRouter(t, "file:team-release-agentcontrol-writer?mode=memory&cache=shared")
 
@@ -626,7 +914,7 @@ func TestReleaseTaskLeaseUsesAgentControlTaskReleaseWriter(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/runtime/teams/"+teamID+"/tasks/"+taskID+"/release", strings.NewReader(`{"status":"ready","summary":"released through agentcontrol","teammate_id":"mate-1"}`))
+	req := newLoopbackTeamTestRequest(http.MethodPost, "/api/runtime/teams/"+teamID+"/tasks/"+taskID+"/release", strings.NewReader(`{"status":"ready","summary":"released through agentcontrol","teammate_id":"mate-1"}`))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -722,31 +1010,31 @@ func TestReleaseTaskCancelledPersistsAgentControlLifecycleMailbox(t *testing.T) 
 	})
 	require.NoError(t, err)
 
-	legacyReq := httptest.NewRequest(http.MethodPost, "/api/runtime/teams/"+teamID+"/tasks/"+legacyTaskID+"/release", strings.NewReader(`{"status":"cancelled","summary":"legacy cancelled","teammate_id":"mate-legacy"}`))
+	legacyReq := newLoopbackTeamTestRequest(http.MethodPost, "/api/runtime/teams/"+teamID+"/tasks/"+legacyTaskID+"/release", strings.NewReader(`{"status":"cancelled","summary":"legacy cancelled","teammate_id":"mate-legacy"}`))
 	legacyReq.Header.Set("Content-Type", "application/json")
 	legacyRec := httptest.NewRecorder()
 	router.ServeHTTP(legacyRec, legacyReq)
 	require.Equal(t, http.StatusOK, legacyRec.Code)
 
-	controlReq := httptest.NewRequest(http.MethodPost, "/api/runtime/agent-control/tasks/"+controlTaskID+"/release", strings.NewReader(`{"workflow":"spawn_team","status":"cancelled","summary":"control cancelled","teammate_id":"mate-control"}`))
+	controlReq := newLoopbackTeamTestRequest(http.MethodPost, "/api/runtime/agent-control/tasks/"+controlTaskID+"/release", strings.NewReader(`{"workflow":"spawn_team","status":"cancelled","summary":"control cancelled","teammate_id":"mate-control"}`))
 	controlReq.Header.Set("Content-Type", "application/json")
 	controlRec := httptest.NewRecorder()
 	router.ServeHTTP(controlRec, controlReq)
 	require.Equal(t, http.StatusOK, controlRec.Code)
 
-	statusReq := httptest.NewRequest(http.MethodPost, "/api/runtime/agent-control/tasks/"+statusTaskID+"/status", strings.NewReader(`{"workflow":"spawn_team","status":"cancelled","summary":"status cancelled"}`))
+	statusReq := newLoopbackTeamTestRequest(http.MethodPost, "/api/runtime/agent-control/tasks/"+statusTaskID+"/status", strings.NewReader(`{"workflow":"spawn_team","status":"cancelled","summary":"status cancelled"}`))
 	statusReq.Header.Set("Content-Type", "application/json")
 	statusRec := httptest.NewRecorder()
 	router.ServeHTTP(statusRec, statusReq)
 	require.Equal(t, http.StatusOK, statusRec.Code)
 
-	updateReq := httptest.NewRequest(http.MethodPatch, "/api/runtime/teams/"+teamID+"/tasks/"+updateTaskID, strings.NewReader(`{"status":"cancelled","summary":"update cancelled"}`))
+	updateReq := newLoopbackTeamTestRequest(http.MethodPatch, "/api/runtime/teams/"+teamID+"/tasks/"+updateTaskID, strings.NewReader(`{"status":"cancelled","summary":"update cancelled"}`))
 	updateReq.Header.Set("Content-Type", "application/json")
 	updateRec := httptest.NewRecorder()
 	router.ServeHTTP(updateRec, updateReq)
 	require.Equal(t, http.StatusOK, updateRec.Code)
 
-	controlUpdateReq := httptest.NewRequest(http.MethodPatch, "/api/runtime/agent-control/tasks/"+controlUpdateTaskID, strings.NewReader(`{"workflow":"spawn_team","team_id":"team-release-cancel","status":"cancelled","summary":"control update cancelled"}`))
+	controlUpdateReq := newLoopbackTeamTestRequest(http.MethodPatch, "/api/runtime/agent-control/tasks/"+controlUpdateTaskID, strings.NewReader(`{"workflow":"spawn_team","team_id":"team-release-cancel","status":"cancelled","summary":"control update cancelled"}`))
 	controlUpdateReq.Header.Set("Content-Type", "application/json")
 	controlUpdateRec := httptest.NewRecorder()
 	router.ServeHTTP(controlUpdateRec, controlUpdateReq)
@@ -783,7 +1071,7 @@ func TestRenewTaskLeaseUsesAgentControlTaskLeaseRenewWriter(t *testing.T) {
 	require.NoError(t, err)
 	renewedLease := time.Now().UTC().Add(5 * time.Minute)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/runtime/teams/"+teamID+"/tasks/"+taskID+"/lease", strings.NewReader(`{"lease_until":"`+renewedLease.Format(time.RFC3339Nano)+`"}`))
+	req := newLoopbackTeamTestRequest(http.MethodPost, "/api/runtime/teams/"+teamID+"/tasks/"+taskID+"/lease", strings.NewReader(`{"lease_until":"`+renewedLease.Format(time.RFC3339Nano)+`"}`))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -822,8 +1110,12 @@ func TestRetryTaskUsesAgentControlTaskRetryWriter(t *testing.T) {
 		LeaseUntil: &leaseUntil,
 	})
 	require.NoError(t, err)
+	current, err := store.GetTask(ctx, taskID)
+	require.NoError(t, err)
+	require.NotNil(t, current)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/runtime/teams/"+teamID+"/tasks/"+taskID+"/retry", strings.NewReader(`{"status":"ready","summary":"retry through agentcontrol","teammate_id":"mate-1"}`))
+	retryBody := fmt.Sprintf(`{"status":"ready","summary":"retry through agentcontrol","teammate_id":"mate-1","expected_version":%d}`, current.Version)
+	req := newLoopbackTeamTestRequest(http.MethodPost, "/api/runtime/teams/"+teamID+"/tasks/"+taskID+"/retry", strings.NewReader(retryBody))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -849,6 +1141,48 @@ func TestRetryTaskUsesAgentControlTaskRetryWriter(t *testing.T) {
 	require.Len(t, records, 1)
 	require.Equal(t, taskID, records[0].ID)
 	require.Equal(t, "retry through agentcontrol", records[0].Summary)
+
+	replayReq := newLoopbackTeamTestRequest(http.MethodPost, "/api/runtime/teams/"+teamID+"/tasks/"+taskID+"/retry", strings.NewReader(retryBody))
+	replayReq.Header.Set("Content-Type", "application/json")
+	replayRec := httptest.NewRecorder()
+	router.ServeHTTP(replayRec, replayReq)
+	require.Equal(t, http.StatusConflict, replayRec.Code, replayRec.Body.String())
+	require.Contains(t, replayRec.Body.String(), "task version conflict")
+
+	afterReplay, err := store.GetTask(ctx, taskID)
+	require.NoError(t, err)
+	require.NotNil(t, afterReplay)
+	require.Equal(t, 1, afterReplay.RetryCount, "replaying the stale version must not increment retry_count twice")
+	require.Equal(t, current.Version+1, afterReplay.Version)
+}
+
+func TestRetryTaskRequiresExpectedVersion(t *testing.T) {
+	ctx, store, router := newTeamTaskOutcomeTestRouter(t, "file:team-retry-requires-version?mode=memory&cache=shared")
+
+	teamID, err := store.CreateTeam(ctx, team.Team{})
+	require.NoError(t, err)
+	taskID, err := store.CreateTask(ctx, team.Task{
+		TeamID: teamID,
+		Title:  "versioned retry",
+		Status: team.TaskStatusReady,
+	})
+	require.NoError(t, err)
+
+	req := newLoopbackTeamTestRequest(
+		http.MethodPost,
+		"/api/runtime/teams/"+teamID+"/tasks/"+taskID+"/retry",
+		strings.NewReader(`{"status":"ready"}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "expected_version is required")
+	task, err := store.GetTask(ctx, taskID)
+	require.NoError(t, err)
+	require.NotNil(t, task)
+	require.Zero(t, task.RetryCount)
 }
 
 func TestListAgentControlTasksHandlerProjectsTeamTasks(t *testing.T) {
@@ -873,7 +1207,7 @@ func TestListAgentControlTasksHandlerProjectsTeamTasks(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/runtime/agent-control/tasks?workflow=spawn_team&team_id="+teamID+"&status=running&limit=5", nil)
+	req := newLoopbackTeamTestRequest(http.MethodGet, "/api/runtime/agent-control/tasks?workflow=spawn_team&team_id="+teamID+"&status=running&limit=5", nil)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 
@@ -914,7 +1248,7 @@ func TestCreateAgentControlTaskEndpointRejectsInvalidDifficulty(t *testing.T) {
 	_, err := store.CreateTeam(ctx, team.Team{ID: "team-1"})
 	require.NoError(t, err)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/runtime/agent-control/tasks", strings.NewReader(`{"id":"task-control-invalid","workflow":"spawn_team","team_id":"team-1","title":"bad difficulty","difficulty":"extreme"}`))
+	req := newLoopbackTeamTestRequest(http.MethodPost, "/api/runtime/agent-control/tasks", strings.NewReader(`{"id":"task-control-invalid","workflow":"spawn_team","team_id":"team-1","title":"bad difficulty","difficulty":"extreme"}`))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -933,13 +1267,14 @@ func TestAgentControlTaskWriteHandlersUseTaskRegistrySeams(t *testing.T) {
 	teamID, err := store.CreateTeam(ctx, team.Team{ID: "team-1"})
 	require.NoError(t, err)
 	_, err = store.UpsertTeammate(ctx, team.Teammate{
-		ID:     "mate-1",
-		TeamID: teamID,
-		State:  team.TeammateStateIdle,
+		ID:        "mate-1",
+		TeamID:    teamID,
+		SessionID: "session-mate-1",
+		State:     team.TeammateStateIdle,
 	})
 	require.NoError(t, err)
 
-	createReq := httptest.NewRequest(http.MethodPost, "/api/runtime/agent-control/tasks", strings.NewReader(`{"id":"task-control","workflow":"spawn_team","team_id":"team-1","title":"Control task","difficulty":"expert","difficulty_rationale":"Control API create path.","status":"ready","assignee":"mate-1","write_paths":["docs/plan.md"]}`))
+	createReq := newLoopbackTeamTestRequest(http.MethodPost, "/api/runtime/agent-control/tasks", strings.NewReader(`{"id":"task-control","workflow":"spawn_team","team_id":"team-1","title":"Control task","difficulty":"expert","difficulty_rationale":"Control API create path.","status":"ready","assignee":"mate-1","write_paths":["docs/plan.md"]}`))
 	createReq.Header.Set("Content-Type", "application/json")
 	createRec := httptest.NewRecorder()
 	router.ServeHTTP(createRec, createReq)
@@ -971,13 +1306,13 @@ func TestAgentControlTaskWriteHandlersUseTaskRegistrySeams(t *testing.T) {
 	require.Equal(t, team.TaskDifficultyExpert, task.Difficulty)
 	require.Equal(t, "Control API create path.", task.DifficultyRationale)
 
-	depReq := httptest.NewRequest(http.MethodPost, "/api/runtime/agent-control/tasks", strings.NewReader(`{"id":"task-dependency","workflow":"spawn_team","team_id":"team-1","title":"Dependency","status":"done"}`))
+	depReq := newLoopbackTeamTestRequest(http.MethodPost, "/api/runtime/agent-control/tasks", strings.NewReader(`{"id":"task-dependency","workflow":"spawn_team","team_id":"team-1","title":"Dependency","status":"done"}`))
 	depReq.Header.Set("Content-Type", "application/json")
 	depRec := httptest.NewRecorder()
 	router.ServeHTTP(depRec, depReq)
 	require.Equal(t, http.StatusCreated, depRec.Code)
 
-	dependencyReq := httptest.NewRequest(http.MethodPost, "/api/runtime/agent-control/tasks/task-control/dependencies", strings.NewReader(`{"workflow":"spawn_team","team_id":"team-1","depends_on_id":"task-dependency"}`))
+	dependencyReq := newLoopbackTeamTestRequest(http.MethodPost, "/api/runtime/agent-control/tasks/task-control/dependencies", strings.NewReader(`{"workflow":"spawn_team","team_id":"team-1","depends_on_id":"task-dependency"}`))
 	dependencyReq.Header.Set("Content-Type", "application/json")
 	dependencyRec := httptest.NewRecorder()
 	router.ServeHTTP(dependencyRec, dependencyReq)
@@ -986,7 +1321,7 @@ func TestAgentControlTaskWriteHandlersUseTaskRegistrySeams(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []string{"task-dependency"}, deps)
 
-	listDependencyReq := httptest.NewRequest(http.MethodGet, "/api/runtime/agent-control/tasks/task-control/dependencies?workflow=spawn_team&team_id=team-1&include_dependents=true", nil)
+	listDependencyReq := newLoopbackTeamTestRequest(http.MethodGet, "/api/runtime/agent-control/tasks/task-control/dependencies?workflow=spawn_team&team_id=team-1&include_dependents=true", nil)
 	listDependencyRec := httptest.NewRecorder()
 	router.ServeHTTP(listDependencyRec, listDependencyReq)
 	require.Equal(t, http.StatusOK, listDependencyRec.Code)
@@ -1017,7 +1352,7 @@ func TestAgentControlTaskWriteHandlersUseTaskRegistrySeams(t *testing.T) {
 	require.False(t, listDependencyPayload.Edges[0].CreatedAt.IsZero())
 	require.Equal(t, 1, listDependencyPayload.Count)
 
-	graphEventsReq := httptest.NewRequest(http.MethodGet, "/api/runtime/agent-control/tasks/events?workflow=spawn_team&team_id=team-1&event_type=task.dependency.created&after_seq=0&limit=5", nil)
+	graphEventsReq := newLoopbackTeamTestRequest(http.MethodGet, "/api/runtime/agent-control/tasks/events?workflow=spawn_team&team_id=team-1&event_type=task.dependency.created&after_seq=0&limit=5", nil)
 	graphEventsRec := httptest.NewRecorder()
 	router.ServeHTTP(graphEventsRec, graphEventsReq)
 	require.Equal(t, http.StatusOK, graphEventsRec.Code)
@@ -1049,15 +1384,16 @@ func TestAgentControlTaskWriteHandlersUseTaskRegistrySeams(t *testing.T) {
 	require.False(t, graphEventsPayload.Events[0].CreatedAt.IsZero())
 
 	claimBody := `{"workflow":"spawn_team","team_id":"team-1","assignee":"mate-1","expected_version":1,"duration_sec":600,"use_path_claims":true,"write_paths":["docs/plan.md"],"workspace_root":"workspace"}`
-	claimReq := httptest.NewRequest(http.MethodPost, "/api/runtime/agent-control/tasks/task-control/claim", strings.NewReader(claimBody))
+	claimReq := newLoopbackTeamTestRequest(http.MethodPost, "/api/runtime/agent-control/tasks/task-control/claim", strings.NewReader(claimBody))
 	claimReq.Header.Set("Content-Type", "application/json")
 	claimRec := httptest.NewRecorder()
 	router.ServeHTTP(claimRec, claimReq)
 	require.Equal(t, http.StatusOK, claimRec.Code)
 	var claimPayload struct {
 		Task struct {
-			ID     string `json:"id"`
-			Status string `json:"status"`
+			ID           string `json:"id"`
+			Status       string `json:"status"`
+			FencingToken string `json:"fencing_token"`
 		} `json:"task"`
 		Claimed bool `json:"claimed"`
 	}
@@ -1070,7 +1406,17 @@ func TestAgentControlTaskWriteHandlersUseTaskRegistrySeams(t *testing.T) {
 	require.Len(t, claims, 1)
 	require.Equal(t, "workspace/docs/plan.md", claims[0].Path)
 
-	terminalReq := httptest.NewRequest(http.MethodPost, "/api/runtime/agent-control/tasks/task-control/terminal", strings.NewReader(`{"workflow":"spawn_team","team_id":"team-1","status":"done","summary":"finished","result_ref":"artifact://done","teammate_id":"mate-1"}`))
+	terminalBody, err := json.Marshal(map[string]interface{}{
+		"workflow":      "spawn_team",
+		"team_id":       "team-1",
+		"status":        "done",
+		"summary":       "finished",
+		"result_ref":    "artifact://done",
+		"teammate_id":   "mate-1",
+		"fencing_token": claimPayload.Task.FencingToken,
+	})
+	require.NoError(t, err)
+	terminalReq := newLoopbackTeamTestRequest(http.MethodPost, "/api/runtime/agent-control/tasks/task-control/terminal", strings.NewReader(string(terminalBody)))
 	terminalReq.Header.Set("Content-Type", "application/json")
 	terminalRec := httptest.NewRecorder()
 	router.ServeHTTP(terminalRec, terminalReq)
@@ -1125,7 +1471,7 @@ func TestAgentControlTaskBlockHandlerUsesTaskRegistrySeam(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/runtime/agent-control/tasks/"+taskID+"/block", strings.NewReader(`{"workflow":"spawn_team","summary":"waiting on dependency","teammate_id":"mate-1"}`))
+	req := newLoopbackTeamTestRequest(http.MethodPost, "/api/runtime/agent-control/tasks/"+taskID+"/block", strings.NewReader(`{"workflow":"spawn_team","summary":"waiting on dependency","teammate_id":"mate-1"}`))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)

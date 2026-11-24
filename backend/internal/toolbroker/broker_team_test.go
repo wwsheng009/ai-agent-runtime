@@ -224,6 +224,51 @@ func TestBrokerDefinitionsForContext_HidesTeamOnlyToolsWithoutActiveRun(t *testi
 	}
 }
 
+func TestBrokerTeamWaitDefinitionExplainsCursorAndSummaryContract(t *testing.T) {
+	broker := &Broker{TeamStore: newTeamStore(t)}
+	var waitDefinition *types.ToolDefinition
+	for _, definition := range broker.Definitions() {
+		if definition.Name == ToolTeamWait {
+			waitDefinition = &definition
+			break
+		}
+	}
+	require.NotNil(t, waitDefinition)
+	assert.Contains(t, waitDefinition.Description, "pass the returned next_cursor back as after_seq")
+	assert.Contains(t, waitDefinition.Description, "never use latest_seq as the continuation cursor")
+	assert.Contains(t, waitDefinition.Description, "timeout only ends this observation")
+	assert.Contains(t, waitDefinition.Description, "only when summary_state=ready")
+
+	properties, ok := waitDefinition.Parameters["properties"].(map[string]interface{})
+	require.True(t, ok)
+	afterSeq, ok := properties["after_seq"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Contains(t, afterSeq["description"], "previous result's next_cursor")
+	assert.Contains(t, afterSeq["description"], "latest_seq is a high-water mark")
+}
+
+func TestBrokerTeamSpawnDefinitionDoesNotClaimWorkerReadiness(t *testing.T) {
+	broker := &Broker{TeamStore: newTeamStore(t)}
+	var spawnDefinition *types.ToolDefinition
+	for _, definition := range broker.Definitions() {
+		if definition.Name == ToolTeamSpawn {
+			spawnDefinition = &definition
+			break
+		}
+	}
+	require.NotNil(t, spawnDefinition)
+	assert.Contains(t, spawnDefinition.Description, "does not prove that workers are ready or executing")
+	assert.Contains(t, spawnDefinition.Description, "start_result.status")
+	assert.NotContains(t, spawnDefinition.Description, "team starts running immediately")
+
+	properties, ok := spawnDefinition.Parameters["properties"].(map[string]interface{})
+	require.True(t, ok)
+	autoStart, ok := properties["auto_start"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Contains(t, autoStart["description"], "not proof that a worker is ready or executing")
+	assert.Contains(t, autoStart["description"], "structured start_result")
+}
+
 func TestBrokerDefinitionsForContext_IncludesTeamOnlyToolsWithActiveRun(t *testing.T) {
 	store := newTeamStore(t)
 	broker := &Broker{TeamStore: store}
@@ -301,6 +346,12 @@ func TestBrokerExecuteWaitTeamReturnsDurableSummary(t *testing.T) {
 		},
 	})
 	require.NoError(t, err)
+	highWaterSeq, err := store.AppendTeamEvent(ctx, team.TeamEvent{
+		Type:    "team.note",
+		TeamID:  teamID,
+		Payload: map[string]interface{}{"note": "newer than the summary"},
+	})
+	require.NoError(t, err)
 
 	broker := &Broker{TeamStore: store}
 	// Terminal + summary are already durable before the call, so the wait
@@ -310,6 +361,8 @@ func TestBrokerExecuteWaitTeamReturnsDurableSummary(t *testing.T) {
 	// observed spuriously). 5s keeps the success path instant.
 	raw, meta, err := broker.Execute(ctx, "lead-session", ToolTeamWait, map[string]interface{}{
 		"team_id":    teamID,
+		"after_seq":  int64(0),
+		"limit":      1,
 		"timeout_ms": 5000,
 	})
 	require.NoError(t, err)
@@ -320,13 +373,255 @@ func TestBrokerExecuteWaitTeamReturnsDurableSummary(t *testing.T) {
 	assert.True(t, result.Terminal)
 	assert.False(t, result.TimedOut)
 	assert.True(t, result.SummaryReady)
+	assert.Equal(t, "ready", result.SummaryState)
 	assert.Equal(t, "all docs reviewed", result.Summary)
 	assert.Equal(t, "lead", result.SummarySource)
 	assert.Equal(t, "all docs reviewed", result.SummaryPayload["summary"])
 	assert.Equal(t, summarySeq, result.SummaryEventSeq)
-	assert.Equal(t, summarySeq, result.LatestSeq)
+	require.Len(t, result.Events, 1)
+	assert.Equal(t, int64(1), result.Events[0].Seq)
+	assert.Equal(t, int64(1), result.NextCursor, "cursor advances only through returned events")
+	assert.Equal(t, highWaterSeq, result.LatestSeq, "high-water includes events beyond this page")
 	require.NotNil(t, meta)
-	assert.Contains(t, meta[cacheSafeSummaryMetadataKey], "Summary is ready")
+	assert.Contains(t, meta[cacheSafeSummaryMetadataKey], "Final summary is ready")
+	assert.Contains(t, meta[cacheSafeSummaryMetadataKey], "next_cursor=1")
+	assert.Contains(t, meta[cacheSafeSummaryMetadataKey], "latest_seq=3")
+}
+
+func TestBrokerExecuteWaitTeamContinuesFromNextCursorNotHighWater(t *testing.T) {
+	store := newTeamStore(t)
+	ctx := context.Background()
+	teamID, err := store.CreateTeam(ctx, team.Team{
+		ID:     "team-wait-paged-cursor",
+		Status: team.TeamStatusDone,
+	})
+	require.NoError(t, err)
+	for _, eventType := range []string{"team.completed", "team.summary", "team.note"} {
+		_, err = store.AppendTeamEvent(ctx, team.TeamEvent{
+			Type:   eventType,
+			TeamID: teamID,
+			Payload: map[string]interface{}{
+				"summary": "ready",
+			},
+		})
+		require.NoError(t, err)
+	}
+
+	broker := &Broker{TeamStore: store}
+	readPage := func(afterSeq int64) WaitTeamResult {
+		t.Helper()
+		raw, _, executeErr := broker.Execute(ctx, "lead-session", ToolTeamWait, map[string]interface{}{
+			"team_id":    teamID,
+			"after_seq":  afterSeq,
+			"limit":      1,
+			"timeout_ms": 5000,
+		})
+		require.NoError(t, executeErr)
+		result, ok := raw.(WaitTeamResult)
+		require.True(t, ok)
+		require.Len(t, result.Events, 1)
+		return result
+	}
+
+	first := readPage(0)
+	require.Equal(t, int64(1), first.Events[0].Seq)
+	require.Equal(t, int64(1), first.NextCursor)
+	require.Equal(t, int64(3), first.LatestSeq, "the high-water mark is intentionally ahead of the page")
+
+	second := readPage(first.NextCursor)
+	require.Equal(t, int64(2), second.Events[0].Seq, "continuation must not skip the event after the first page")
+	require.Equal(t, int64(2), second.NextCursor)
+	require.Equal(t, int64(3), second.LatestSeq)
+
+	third := readPage(second.NextCursor)
+	require.Equal(t, int64(3), third.Events[0].Seq)
+	require.Equal(t, int64(3), third.NextCursor)
+}
+
+func TestWaitTeamCacheSafeSummarySeparatesSummaryStateAndCursor(t *testing.T) {
+	for _, summaryState := range []string{"pending", "failed", "ready"} {
+		t.Run(summaryState, func(t *testing.T) {
+			summary := waitTeamCacheSafeSummary(WaitTeamResult{
+				TeamID:       "team-summary-state",
+				Status:       string(team.TeamStatusDone),
+				Terminal:     true,
+				SummaryReady: true,
+				SummaryState: summaryState,
+				Summary:      "candidate summary",
+				EventCount:   1,
+				NextCursor:   2,
+				LatestSeq:    9,
+			})
+			assert.Contains(t, summary, "Summary state: "+summaryState+".")
+			assert.Contains(t, summary, "next_cursor=2")
+			assert.Contains(t, summary, "latest_seq=9 is only the durable high-water mark")
+			if summaryState == "ready" {
+				assert.Contains(t, summary, "Final summary: candidate summary")
+			} else {
+				assert.NotContains(t, summary, "candidate summary")
+			}
+		})
+	}
+}
+
+func TestBrokerExecuteWaitTeamCursorIsScopedToRequestedTeam(t *testing.T) {
+	store := newTeamStore(t)
+	ctx := context.Background()
+	teamA, err := store.CreateTeam(ctx, team.Team{
+		ID:     "team-wait-cursor-a",
+		Status: team.TeamStatusActive,
+	})
+	require.NoError(t, err)
+	teamB, err := store.CreateTeam(ctx, team.Team{
+		ID:     "team-wait-cursor-b",
+		Status: team.TeamStatusActive,
+	})
+	require.NoError(t, err)
+	for _, teamID := range []string{teamA, teamB} {
+		_, err = store.CreateTask(ctx, team.Task{
+			ID:     teamID + "-task",
+			TeamID: teamID,
+			Status: team.TaskStatusRunning,
+		})
+		require.NoError(t, err)
+	}
+	for _, eventType := range []string{"team.started", "task.progress"} {
+		_, err = store.AppendTeamEvent(ctx, team.TeamEvent{
+			Type:    eventType,
+			TeamID:  teamA,
+			Payload: map[string]interface{}{"owner": "team-a"},
+		})
+		require.NoError(t, err)
+	}
+	for _, eventType := range []string{"team.started", "task.progress", "task.note"} {
+		_, err = store.AppendTeamEvent(ctx, team.TeamEvent{
+			Type:    eventType,
+			TeamID:  teamB,
+			Payload: map[string]interface{}{"owner": "team-b"},
+		})
+		require.NoError(t, err)
+	}
+
+	broker := &Broker{
+		TeamStore: store,
+		WaitTimeoutPolicy: func() agentcontrol.WaitTimeoutPolicy {
+			return agentcontrol.WaitTimeoutPolicy{DefaultMs: 1, MinMs: 1, MaxMs: 1}
+		},
+	}
+	raw, _, err := broker.Execute(ctx, "lead-session", ToolTeamWait, map[string]interface{}{
+		"team_id":    teamA,
+		"after_seq":  int64(1),
+		"limit":      10,
+		"timeout_ms": 1,
+	})
+	require.NoError(t, err)
+	result, ok := raw.(WaitTeamResult)
+	require.True(t, ok)
+	require.True(t, result.TimedOut)
+	require.False(t, result.Terminal)
+	require.Len(t, result.Events, 1)
+	assert.Equal(t, teamA, result.Events[0].TeamID)
+	assert.Equal(t, int64(2), result.Events[0].Seq)
+	assert.Equal(t, int64(2), result.NextCursor)
+	assert.Equal(t, int64(2), result.LatestSeq,
+		"team B events must not affect team A's cursor high-water")
+}
+
+func TestBrokerWaitTeamSnapshotReturnsDurableSummaryFailureAndLaterSuccess(t *testing.T) {
+	store := newTeamStore(t)
+	ctx := context.Background()
+	teamID, err := store.CreateTeam(ctx, team.Team{
+		ID:     "team-wait-summary-failed",
+		Status: team.TeamStatusDone,
+	})
+	require.NoError(t, err)
+	_, err = store.AppendTeamEvent(ctx, team.TeamEvent{
+		Type:    "team.completed",
+		TeamID:  teamID,
+		Payload: map[string]interface{}{"status": string(team.TeamStatusDone)},
+	})
+	require.NoError(t, err)
+	previousSummarySeq, err := store.AppendTeamEvent(ctx, team.TeamEvent{
+		Type:   "team.summary",
+		TeamID: teamID,
+		Payload: map[string]interface{}{
+			"summary":        "previous completed summary",
+			"summary_source": "lead",
+		},
+	})
+	require.NoError(t, err)
+	failedSeq, err := store.AppendTeamEvent(ctx, team.TeamEvent{
+		Type:   "team.summary.failed",
+		TeamID: teamID,
+		Payload: map[string]interface{}{
+			"error_type": "lead_session_error",
+			"error":      "lead session unavailable",
+		},
+	})
+	require.NoError(t, err)
+
+	broker := &Broker{TeamStore: store}
+	failedResult, err := broker.readWaitTeamSnapshot(ctx, teamID, WaitTeamArgs{
+		TeamID:   teamID,
+		AfterSeq: previousSummarySeq - 1,
+		Limit:    1,
+	})
+	require.NoError(t, err)
+	assert.True(t, failedResult.Terminal)
+	assert.False(t, failedResult.SummaryReady)
+	assert.Equal(t, "failed", failedResult.SummaryState)
+	assert.Equal(t, failedSeq, failedResult.SummaryEventSeq)
+	assert.Empty(t, failedResult.Summary)
+	assert.Empty(t, failedResult.SummarySource)
+	assert.Equal(t, "lead_session_error", failedResult.SummaryPayload["error_type"])
+	assert.True(t, waitTeamSummaryResolved(failedResult), "a durable summary failure resolves the summary wait")
+	assert.Equal(t, previousSummarySeq, failedResult.NextCursor, "cursor advances only through the returned event page")
+	assert.Equal(t, failedSeq, failedResult.LatestSeq, "high-water includes the summary failure beyond the page")
+
+	fallbackSummarySeq, err := store.AppendTeamEvent(ctx, team.TeamEvent{
+		Type:   "team.summary",
+		TeamID: teamID,
+		Payload: map[string]interface{}{
+			"summary":        "fallback summary available",
+			"summary_source": "fallback",
+			"used_fallback":  true,
+			"error_type":     "lead_session_error",
+		},
+	})
+	require.NoError(t, err)
+	fallbackResult, err := broker.readWaitTeamSnapshot(ctx, teamID, WaitTeamArgs{
+		TeamID:   teamID,
+		AfterSeq: failedSeq,
+		Limit:    24,
+	})
+	require.NoError(t, err)
+	assert.True(t, fallbackResult.SummaryReady, "a fallback summary is usable even when its primary generation failed")
+	assert.Equal(t, "failed", fallbackResult.SummaryState)
+	assert.True(t, waitTeamSummaryResolved(fallbackResult))
+	assert.Equal(t, fallbackSummarySeq, fallbackResult.SummaryEventSeq)
+	assert.Equal(t, "fallback summary available", fallbackResult.Summary)
+	assert.Equal(t, fallbackSummarySeq, fallbackResult.NextCursor)
+
+	summarySeq, err := store.AppendTeamEvent(ctx, team.TeamEvent{
+		Type:   "team.summary",
+		TeamID: teamID,
+		Payload: map[string]interface{}{
+			"summary":        "summary retry succeeded",
+			"summary_source": "lead",
+		},
+	})
+	require.NoError(t, err)
+	readyResult, err := broker.readWaitTeamSnapshot(ctx, teamID, WaitTeamArgs{
+		TeamID:   teamID,
+		AfterSeq: fallbackSummarySeq,
+		Limit:    24,
+	})
+	require.NoError(t, err)
+	assert.True(t, readyResult.SummaryReady)
+	assert.Equal(t, "ready", readyResult.SummaryState, "a later successful summary supersedes earlier failure metadata")
+	assert.Equal(t, summarySeq, readyResult.SummaryEventSeq)
+	assert.Equal(t, "summary retry succeeded", readyResult.Summary)
+	assert.Equal(t, summarySeq, readyResult.NextCursor)
 }
 
 func TestBrokerExecuteWaitTeamReturnsPartialStructuredSummary(t *testing.T) {
@@ -404,6 +699,61 @@ func TestBrokerExecuteWaitTeamWaitsForSummaryWhenPlannerConfigured(t *testing.T)
 	assert.False(t, result.TimedOut)
 	assert.True(t, result.SummaryReady)
 	assert.Equal(t, "async final summary", result.Summary)
+}
+
+func TestBrokerExecuteWaitTeamTerminalSummaryPendingTimesOutWithoutExecutionClaim(t *testing.T) {
+	store := newTeamStore(t)
+	ctx := context.Background()
+	teamID, err := store.CreateTeam(ctx, team.Team{
+		ID:            "team-wait-terminal-summary-pending",
+		LeadSessionID: "lead-session",
+		Status:        team.TeamStatusActive,
+	})
+	require.NoError(t, err)
+	taskID, err := store.CreateTask(ctx, team.Task{
+		ID:     "task-terminal-summary-pending",
+		TeamID: teamID,
+		Status: team.TaskStatusRunning,
+	})
+	require.NoError(t, err)
+
+	broker := &Broker{
+		TeamStore: store,
+		WaitTimeoutPolicy: func() agentcontrol.WaitTimeoutPolicy {
+			return agentcontrol.WaitTimeoutPolicy{DefaultMs: 250, MinMs: 1, MaxMs: 1000}
+		},
+	}
+	completed := make(chan struct{})
+	go func() {
+		defer close(completed)
+		time.Sleep(20 * time.Millisecond)
+		_ = store.UpdateTaskStatus(ctx, taskID, team.TaskStatusDone, "task completed")
+		_ = store.UpdateTeamStatus(ctx, teamID, team.TeamStatusDone)
+		_, _ = store.AppendTeamEvent(ctx, team.TeamEvent{
+			Type:   "team.completed",
+			TeamID: teamID,
+			Payload: map[string]interface{}{
+				"status": string(team.TeamStatusDone),
+			},
+		})
+	}()
+
+	raw, _, err := broker.Execute(ctx, "lead-session", ToolTeamWait, map[string]interface{}{
+		"team_id":         teamID,
+		"timeout_ms":      250,
+		"require_summary": true,
+	})
+	require.NoError(t, err)
+	<-completed
+	result, ok := raw.(WaitTeamResult)
+	require.True(t, ok)
+	assert.True(t, result.TimedOut)
+	assert.True(t, result.Terminal)
+	assert.False(t, result.SummaryReady)
+	assert.Equal(t, "pending", result.SummaryState)
+	assert.False(t, result.ExecutionContinues,
+		"summary observation can time out after Team execution has already terminated")
+	assert.Contains(t, result.NextAction, "team execution is terminal but summary is not ready")
 }
 
 // TestBrokerExecuteWaitTeamEventDrivenWakeReturnsFast verifies P6-1: team_wait
@@ -1200,6 +1550,10 @@ func TestBrokerExecuteSpawnTeamCreatesTeamTeammatesAndTasks(t *testing.T) {
 	assert.True(t, result.CreatedTeam)
 	assert.Equal(t, 2, result.TeammateCount)
 	assert.Equal(t, 2, result.TaskCount)
+	assert.True(t, result.AutoStartRequested)
+	assert.True(t, result.AutoStarted)
+	assert.Equal(t, "lifecycle_sync_requested", result.StartResult.Status)
+	assert.Equal(t, "supported", result.Capabilities["team_lifecycle_sync"])
 	assert.Equal(t, 1, loopCalls)
 
 	teamRecord, err := store.GetTeam(ctx, "team-auto")
@@ -1416,6 +1770,34 @@ func TestBrokerExecuteSpawnTeamAutoStartSynthesizesTeammatesForTasks(t *testing.
 	assert.Equal(t, "team-docs__mate_1", teammates[0].SessionID)
 	assert.Equal(t, "mate-2", teammates[1].ID)
 	assert.Equal(t, "team-docs__mate_2", teammates[1].SessionID)
+}
+
+func TestBrokerExecuteSpawnTeamAutoStartFailsClosedWithoutLifecycleHost(t *testing.T) {
+	store := newTeamStore(t)
+	ctx := context.Background()
+	broker := &Broker{TeamStore: store}
+
+	raw, meta, err := broker.Execute(ctx, "session-1", ToolTeamSpawn, map[string]interface{}{
+		"team_id":    "team-no-host",
+		"auto_start": true,
+		"tasks": []interface{}{
+			map[string]interface{}{
+				"id":    "task-no-host",
+				"title": "wait for host",
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	result, ok := raw.(SpawnTeamResult)
+	require.True(t, ok)
+	assert.True(t, result.AutoStartRequested)
+	assert.False(t, result.AutoStarted)
+	assert.Equal(t, "unavailable", result.StartResult.Status)
+	assert.NotEmpty(t, result.StartResult.NextAction)
+	assert.Equal(t, "unsupported", result.Capabilities["team_lifecycle_sync"])
+	assert.Equal(t, result.StartResult, meta["start_result"])
+	assert.Contains(t, meta[cacheSafeSummaryMetadataKey], "no Team lifecycle host")
 }
 
 func TestBrokerReportTaskOutcomePersistsTaskEventBeforeTeamCompleted(t *testing.T) {

@@ -1632,6 +1632,7 @@ func TestStream_Consume_CallbackError(t *testing.T) {
 
 func TestClient_AdminMutationUsesToken(t *testing.T) {
 	server := newTestServer(t, true, func(handler *runtimeapi.Handler) {
+		handler.SetAdminAuthRequired(true)
 		handler.SetAdminToken("secret-token")
 	})
 
@@ -3053,17 +3054,24 @@ func TestClient_CreateAndUpdateTeamTask(t *testing.T) {
 	newResultRef := "artifact://final"
 	updateResp, err := client.UpdateTeamTask(context.Background(), teamID, createResp.Task.ID, UpdateTeamTaskRequest{
 		Title:     &newTitle,
-		Status:    &newStatus,
 		Summary:   &newSummary,
 		ResultRef: &newResultRef,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, createResp.Task.ID, updateResp.Task.ID)
 	assert.Equal(t, "updated task", updateResp.Task.Title)
-	assert.Equal(t, "ready", updateResp.Task.Status)
+	assert.Equal(t, "pending", updateResp.Task.Status)
 	assert.Equal(t, "ready to assign", updateResp.Task.Summary)
 	require.NotNil(t, updateResp.Task.ResultRef)
 	assert.Equal(t, "artifact://final", *updateResp.Task.ResultRef)
+
+	// Lifecycle status transitions are deliberately not accepted through PATCH;
+	// use the dedicated Runtime action instead.
+	_, err = client.MarkReadyTasks(context.Background(), teamID)
+	require.NoError(t, err)
+	readyResp, err := client.GetTeamTask(context.Background(), teamID, createResp.Task.ID, GetTeamTaskOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, newStatus, readyResp.Task.Status)
 }
 
 func TestClient_AddTaskDependency(t *testing.T) {
@@ -3114,9 +3122,10 @@ func TestClient_ClaimReadyTasks(t *testing.T) {
 		teamID, err = store.CreateTeam(ctx, team.Team{})
 		require.NoError(t, err)
 		_, err = store.UpsertTeammate(ctx, team.Teammate{
-			ID:     "mate-1",
-			TeamID: teamID,
-			State:  team.TeammateStateIdle,
+			ID:        "mate-1",
+			TeamID:    teamID,
+			SessionID: "session-mate-1",
+			State:     team.TeammateStateIdle,
 		})
 		require.NoError(t, err)
 		_, err = store.CreateTask(ctx, team.Task{
@@ -3315,11 +3324,13 @@ func TestClient_ReplanTaskUsesEndpoint(t *testing.T) {
 
 	client := NewClient(server.URL)
 	resp, err := client.ReplanTask(context.Background(), "team-1", "task-1", ReplanTaskRequest{
-		AutoPersist: true,
+		AutoPersist:     true,
+		ExpectedVersion: 7,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "/api/runtime/teams/team-1/tasks/task-1/replan", gotPath)
 	assert.True(t, gotReq.AutoPersist)
+	assert.Equal(t, int64(7), gotReq.ExpectedVersion)
 	assert.Equal(t, "team-1", resp.TeamID)
 	assert.Equal(t, "task-1", resp.FailedTask)
 	assert.Len(t, resp.Tasks, 1)

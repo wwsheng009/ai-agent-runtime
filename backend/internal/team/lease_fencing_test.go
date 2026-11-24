@@ -26,6 +26,15 @@ func setupFencedTask(t *testing.T, usePathClaims bool) (*SQLiteStore, string, st
 		State:     TeammateStateIdle,
 	})
 	require.NoError(t, err)
+	_, err = store.UpsertTeammate(ctx, Teammate{
+		ID:        "mate-b",
+		TeamID:    teamID,
+		Name:      "mate-b",
+		Profile:   "worker",
+		SessionID: "session-b",
+		State:     TeammateStateIdle,
+	})
+	require.NoError(t, err)
 	taskID, err := store.CreateTask(ctx, Task{
 		TeamID:     teamID,
 		Title:      "fenced",
@@ -113,10 +122,11 @@ func TestTerminalRejectsStaleAttempt(t *testing.T) {
 
 	// The task is reclaimed and re-assigned to a new attempt.
 	registry := NewAgentControlTaskRegistry(store)
-	_, err := registry.RetryAgentControlTask(ctx, agentcontrol.TaskRetryRequest{
-		ID:       taskID,
-		Workflow: agentcontrol.WorkflowSpawnTeam,
-		Status:   string(TaskStatusReady),
+	_, err := registry.ReleaseAgentControlTask(ctx, agentcontrol.TaskReleaseRequest{
+		ID:           taskID,
+		Workflow:     agentcontrol.WorkflowSpawnTeam,
+		Status:       string(TaskStatusReady),
+		FencingToken: first.FencingToken,
 	})
 	require.NoError(t, err)
 	second, claimed, err := registry.ClaimAgentControlTask(ctx, agentcontrol.TaskClaimRequest{
@@ -260,4 +270,154 @@ func TestHeartbeatLoopRenewsTaskLease(t *testing.T) {
 	require.NotNil(t, updated.LeaseUntil)
 	require.True(t, updated.LeaseUntil.After(time.Now().UTC()), "heartbeat loop must renew the task lease")
 	require.Equal(t, first.FencingToken, updated.FencingToken, "renewal must not rotate the fencing token")
+}
+
+func TestReleaseRequiresCurrentTokenButCancellationCanRevoke(t *testing.T) {
+	ctx := context.Background()
+	store, _, taskID, claim := setupFencedTask(t, false)
+	registry := NewAgentControlTaskRegistry(store)
+
+	_, err := registry.ReleaseAgentControlTask(ctx, agentcontrol.TaskReleaseRequest{
+		ID:       taskID,
+		Workflow: agentcontrol.WorkflowSpawnTeam,
+		Status:   string(TaskStatusReady),
+	})
+	require.ErrorIs(t, err, agentcontrol.ErrTaskFencingMismatch,
+		"an ordinary release without the active attempt token must not revoke its claim")
+
+	current, err := store.GetTask(ctx, taskID)
+	require.NoError(t, err)
+	require.NotNil(t, current)
+	require.Equal(t, TaskStatusRunning, current.Status)
+	require.Equal(t, claim.FencingToken, current.FencingToken)
+
+	cancelled, err := registry.ReleaseAgentControlTask(ctx, agentcontrol.TaskReleaseRequest{
+		ID:       taskID,
+		Workflow: agentcontrol.WorkflowSpawnTeam,
+		Status:   string(TaskStatusCancelled),
+		Summary:  "cancelled by control plane",
+	})
+	require.NoError(t, err, "control-plane cancellation intentionally revokes the current claim")
+	require.NotNil(t, cancelled)
+	require.Equal(t, string(TaskStatusCancelled), cancelled.Status)
+}
+
+func TestFencedLifecycleDoesNotMutateAnotherTeamsTeammate(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	taskTeamID, err := store.CreateTeam(ctx, Team{Status: TeamStatusActive})
+	require.NoError(t, err)
+	otherTeamID, err := store.CreateTeam(ctx, Team{Status: TeamStatusActive})
+	require.NoError(t, err)
+	_, err = store.UpsertTeammate(ctx, Teammate{
+		ID:     "foreign-mate",
+		TeamID: otherTeamID,
+		State:  TeammateStateBusy,
+	})
+	require.NoError(t, err)
+
+	registry := NewAgentControlTaskRegistry(store)
+	createClaimedTask := func(id, token string) {
+		t.Helper()
+		assignee := "foreign-mate"
+		_, createErr := store.CreateTask(ctx, Task{
+			ID:       id,
+			TeamID:   taskTeamID,
+			Status:   TaskStatusRunning,
+			Assignee: &assignee,
+		})
+		require.NoError(t, createErr)
+		_, updateErr := store.db.ExecContext(ctx, `
+			UPDATE agent_control_task_records
+			SET fencing_token = ?
+			WHERE workflow = ? AND task_id = ?
+		`, token, agentcontrol.WorkflowSpawnTeam, id)
+		require.NoError(t, updateErr)
+	}
+	assertForeignMateStillBusy := func() {
+		t.Helper()
+		mate, getErr := store.GetTeammate(ctx, "foreign-mate")
+		require.NoError(t, getErr)
+		require.NotNil(t, mate)
+		require.Equal(t, TeammateStateBusy, mate.State)
+	}
+
+	createClaimedTask("task-cross-team-release", "release-token")
+	_, err = registry.ReleaseAgentControlTask(ctx, agentcontrol.TaskReleaseRequest{
+		ID:           "task-cross-team-release",
+		Workflow:     agentcontrol.WorkflowSpawnTeam,
+		Status:       string(TaskStatusReady),
+		FencingToken: "release-token",
+	})
+	require.NoError(t, err)
+	assertForeignMateStillBusy()
+
+	createClaimedTask("task-cross-team-retry", "retry-token")
+	_, err = registry.RetryAgentControlTask(ctx, agentcontrol.TaskRetryRequest{
+		ID:           "task-cross-team-retry",
+		Workflow:     agentcontrol.WorkflowSpawnTeam,
+		Status:       string(TaskStatusReady),
+		FencingToken: "retry-token",
+	})
+	require.NoError(t, err)
+	assertForeignMateStillBusy()
+
+	createClaimedTask("task-cross-team-block", "block-token")
+	_, err = registry.BlockAgentControlTask(ctx, agentcontrol.TaskBlockRequest{
+		ID:           "task-cross-team-block",
+		Workflow:     agentcontrol.WorkflowSpawnTeam,
+		Summary:      "blocked",
+		FencingToken: "block-token",
+	})
+	require.NoError(t, err)
+	assertForeignMateStillBusy()
+}
+
+func TestFencedLifecycleRollsBackTaskWhenTeammateUpdateFails(t *testing.T) {
+	for _, action := range []string{"block", "terminal"} {
+		t.Run(action, func(t *testing.T) {
+			ctx := context.Background()
+			store, _, taskID, claim := setupFencedTask(t, false)
+			_, err := store.db.ExecContext(ctx, `
+				CREATE TRIGGER fail_teammate_state_update
+				BEFORE UPDATE OF state ON teammates
+				WHEN NEW.id = 'mate-a'
+				BEGIN
+					SELECT RAISE(ABORT, 'injected teammate state failure');
+				END;
+			`)
+			require.NoError(t, err)
+
+			registry := NewAgentControlTaskRegistry(store)
+			switch action {
+			case "block":
+				_, err = registry.BlockAgentControlTask(ctx, agentcontrol.TaskBlockRequest{
+					ID:           taskID,
+					Workflow:     agentcontrol.WorkflowSpawnTeam,
+					Summary:      "blocked",
+					FencingToken: claim.FencingToken,
+				})
+			case "terminal":
+				_, err = registry.UpdateAgentControlTaskTerminal(ctx, agentcontrol.TaskTerminalUpdateRequest{
+					ID:           taskID,
+					Workflow:     agentcontrol.WorkflowSpawnTeam,
+					Status:       string(TaskStatusDone),
+					Summary:      "completed",
+					FencingToken: claim.FencingToken,
+				})
+			}
+			require.ErrorContains(t, err, "injected teammate state failure")
+
+			task, err := store.GetTask(ctx, taskID)
+			require.NoError(t, err)
+			require.NotNil(t, task)
+			require.Equal(t, TaskStatusRunning, task.Status, "task transition must roll back with the teammate update")
+			require.Equal(t, claim.FencingToken, task.FencingToken, "the active attempt must remain current")
+
+			mate, err := store.GetTeammate(ctx, "mate-a")
+			require.NoError(t, err)
+			require.NotNil(t, mate)
+			require.Equal(t, TeammateStateBusy, mate.State)
+		})
+	}
 }

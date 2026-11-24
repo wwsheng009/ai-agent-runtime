@@ -312,7 +312,7 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 		{
 			Name:        "/timeline",
 			Usage:       "/timeline [team|active] [limit] [filter=<text>]",
-			Summary:     "显示指定或 active team 协作事件",
+			Summary:     "显示指定或 active team 协作事件；Team 对话工作流：先用 team_spawn 创建，再用 team_wait 按 next_cursor 续接观察；team_task_*、team_send、team_mailbox 仅在 active Team 中可用",
 			Group:       string(chatSlashCommandGroupSession),
 			AcceptsArgs: true,
 			Args: []chatSlashCommandArgSpec{
@@ -925,6 +925,22 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 		specs = chatSlashCommandCatalogHideRouting(specs)
 	}
 	return specs
+}
+
+// chatTeamWorkflowHelpLines documents the Team tool workflow in the human
+// /help surface. These are tool calls made by the model during a conversation,
+// not additional slash commands, so they intentionally do not enter the slash
+// command registry or completion catalog.
+func chatTeamWorkflowHelpLines() []string {
+	return []string{
+		"",
+		"Team 协作工具（由对话中的模型调用）:",
+		"  team_spawn       创建/复用 Team；auto_start 只表示请求生命周期同步，不等于 worker 已 ready",
+		"  team_wait        观察持久化事件；下一次继续传回 next_cursor；timeout 只结束观察窗口，不把 Team 标为失败",
+		"  team_task_spec/context/report/block、team_send、team_mailbox",
+		"                    需要 active Team；普通 subagent 不可使用这些 Team-only 工具",
+		"  终态与 summary readiness 分开：只有 summary_state=ready 才展示最终摘要；artifact 目前仅展示 opaque ref",
+	}
 }
 
 // chatSlashCommandCatalogHideRouting 在 §8.3 紧急开关（U-6）开启时从目录中移除

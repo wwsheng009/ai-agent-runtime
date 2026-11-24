@@ -17,9 +17,11 @@ export function createInitialOpenSections(): TeamDetailsSectionState {
   return {
     roster: true,
     tasks: true,
+    preflight: true,
     mailbox: false,
     claims: false,
     timeline: false,
+    results: false,
     summary: true,
   };
 }

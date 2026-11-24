@@ -212,10 +212,42 @@ type SpawnTaskSpec struct {
 	DependsOn           []string `json:"depends_on,omitempty"`
 }
 
-// SpawnTeamResult returns created entities for a team_spawn call.
+// SpawnTeamPreflightResult reports whether team_spawn evaluated a preflight
+// before requesting the legacy Team lifecycle. team_spawn does not create a
+// product Team Run snapshot, so its result must not imply that product Run
+// preflight ran.
+type SpawnTeamPreflightResult struct {
+	Status     string `json:"status"`
+	Capability string `json:"capability"`
+	Reason     string `json:"reason,omitempty"`
+}
+
+// SpawnTeamStartResult distinguishes an explicit auto-start request from the
+// host's lifecycle-sync trigger. A trigger is not proof that a worker session
+// is ready or has begun executing.
+type SpawnTeamStartResult struct {
+	Requested  bool   `json:"requested"`
+	Status     string `json:"status"`
+	NextAction string `json:"next_action,omitempty"`
+}
+
+// SpawnTeamResult is a structured receipt for team_spawn. RunID is a
+// compatibility alias for TeamID, not an independently persisted product Run;
+// CompatibilityMode makes that boundary explicit.
 type SpawnTeamResult struct {
-	TeamID        string   `json:"team_id"`
-	CreatedTeam   bool     `json:"created_team"`
+	Operation          string                   `json:"operation"`
+	TeamID             string                   `json:"team_id"`
+	RunID              string                   `json:"run_id"`
+	CompatibilityMode  string                   `json:"compatibility_mode"`
+	EventSeq           int64                    `json:"event_seq"`
+	Capabilities       map[string]string        `json:"capabilities"`
+	Preflight          SpawnTeamPreflightResult `json:"preflight"`
+	StartResult        SpawnTeamStartResult     `json:"start_result"`
+	CreatedTeam        bool                     `json:"created_team"`
+	AutoStartRequested bool                     `json:"auto_start_requested"`
+	// AutoStarted is a deprecated compatibility flag. When true, it only means
+	// the host lifecycle-sync callback was invoked; it does not mean a worker
+	// became ready or began executing. StartResult carries the precise status.
 	AutoStarted   bool     `json:"auto_started"`
 	TeammateIDs   []string `json:"teammate_ids,omitempty"`
 	TaskIDs       []string `json:"task_ids,omitempty"`
@@ -260,13 +292,18 @@ type WaitTeamResult struct {
 	ExecutionContinues bool                   `json:"execution_continues,omitempty"`
 	NextAction         string                 `json:"next_action,omitempty"`
 	SummaryReady       bool                   `json:"summary_ready"`
+	SummaryState       string                 `json:"summary_state"`
 	Summary            string                 `json:"summary,omitempty"`
 	SummarySource      string                 `json:"summary_source,omitempty"`
 	SummaryPayload     map[string]interface{} `json:"summary_payload,omitempty"`
 	SummaryEventSeq    int64                  `json:"summary_event_seq,omitempty"`
 	Events             []WaitTeamEventResult  `json:"events,omitempty"`
 	EventCount         int                    `json:"event_count"`
-	LatestSeq          int64                  `json:"latest_seq,omitempty"`
+	// NextCursor is the Team-local sequence through which Events were consumed.
+	// It is intentionally separate from LatestSeq: the latter is the durable
+	// Team high-water mark and may include an independently-read summary event.
+	NextCursor int64 `json:"next_cursor"`
+	LatestSeq  int64 `json:"latest_seq,omitempty"`
 	// Obligations / TerminalCount / TerminalDelta / PendingCount carry the same
 	// wait-ledger view subagent_wait returns (plan §C3-4 统一返回契约 / AC-P2-4g
 	// 共享实现), scoped to the awaited team's tasks: subject_kind "team_task",
@@ -386,15 +423,16 @@ type ReadTaskContextResult struct {
 
 // ReportTaskOutcomeArgs reports a structured task outcome for the current team task.
 type ReportTaskOutcomeArgs struct {
-	TeamID     string `json:"team_id,omitempty"`
-	TaskID     string `json:"task_id,omitempty"`
-	TaskStatus string `json:"task_status,omitempty"`
-	Summary    string `json:"summary,omitempty"`
-	Blocker    string `json:"blocker,omitempty"`
-	HandoffTo  string `json:"handoff_to,omitempty"`
-	ResultRef  string `json:"result_ref,omitempty"`
-	NotifyLead *bool  `json:"notify_lead,omitempty"`
-	AutoReplan *bool  `json:"auto_replan,omitempty"`
+	TeamID       string `json:"team_id,omitempty"`
+	TaskID       string `json:"task_id,omitempty"`
+	TaskStatus   string `json:"task_status,omitempty"`
+	Summary      string `json:"summary,omitempty"`
+	Blocker      string `json:"blocker,omitempty"`
+	HandoffTo    string `json:"handoff_to,omitempty"`
+	ResultRef    string `json:"result_ref,omitempty"`
+	FencingToken string `json:"fencing_token,omitempty"`
+	NotifyLead   *bool  `json:"notify_lead,omitempty"`
+	AutoReplan   *bool  `json:"auto_replan,omitempty"`
 }
 
 // ReportTaskOutcomeResult reports the stored task outcome and any follow-up work.

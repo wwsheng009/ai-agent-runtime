@@ -27,13 +27,50 @@ func spawnTeamCacheSafeSummary(result SpawnTeamResult) string {
 		action = "Reused"
 	}
 	teamID := firstNonEmptyString(strings.TrimSpace(result.TeamID), "team")
+	runID := firstNonEmptyString(strings.TrimSpace(result.RunID), teamID)
 	parts := []string{
-		fmt.Sprintf("%s team run %s with %d teammates and %d tasks.", action, teamID, result.TeammateCount, result.TaskCount),
+		fmt.Sprintf(
+			"%s Team %s (compatibility Run ID %s, mode=%s) with %d teammates and %d tasks.",
+			action, teamID, runID, firstNonEmptyString(strings.TrimSpace(result.CompatibilityMode), "unknown"),
+			result.TeammateCount, result.TaskCount,
+		),
 	}
-	if result.AutoStarted {
-		parts = append(parts, "Background orchestration auto-started.")
+	if result.StartResult.Requested {
+		switch strings.TrimSpace(result.StartResult.Status) {
+		case "lifecycle_sync_requested":
+			parts = append(parts, "The host Team lifecycle sync was requested; worker readiness/execution has not been verified.")
+		case "unavailable":
+			parts = append(parts, "Background execution was requested but no Team lifecycle host was available.")
+		default:
+			parts = append(parts, "Background execution was requested but not triggered.")
+		}
 	} else {
-		parts = append(parts, "Background orchestration not auto-started.")
+		parts = append(parts, "Background execution was not requested.")
+	}
+	if result.Preflight.Status != "" {
+		parts = append(parts, fmt.Sprintf(
+			"Preflight status=%s (capability=%s).",
+			result.Preflight.Status, firstNonEmptyString(strings.TrimSpace(result.Preflight.Capability), "unknown"),
+		))
+		if reason := truncateCacheSafeSummary(result.Preflight.Reason, 220); reason != "" {
+			parts = append(parts, "Preflight note: "+reason)
+		}
+	}
+	if len(result.Capabilities) > 0 {
+		eventCursor := firstNonEmptyString(result.Capabilities["team_event_cursor"], "unknown")
+		parts = append(parts, fmt.Sprintf(
+			"Independent product Run=%s; Run history=%s; Team event cursor=%s.",
+			firstNonEmptyString(result.Capabilities["product_run_resource"], "unknown"),
+			firstNonEmptyString(result.Capabilities["independent_run_history"], "unknown"),
+			eventCursor,
+		))
+		if eventCursor == "supported" {
+			parts = append(parts, fmt.Sprintf("Continue observing with team_wait(team_id=%s, after_seq=%d).", teamID, result.EventSeq))
+		} else {
+			parts = append(parts, fmt.Sprintf("Team event cursor is unavailable; restart observation with team_wait(team_id=%s).", teamID))
+		}
+	} else {
+		parts = append(parts, fmt.Sprintf("Team event cursor is unavailable; restart observation with team_wait(team_id=%s).", teamID))
 	}
 	return strings.Join(parts, " ")
 }
@@ -48,6 +85,13 @@ func waitTeamCacheSafeSummary(result WaitTeamResult) string {
 		lines = append(lines, "Wait timed out before terminal state; team execution continues.")
 	} else {
 		lines = append(lines, "Team is still running.")
+	}
+	if result.Terminal {
+		summaryState := strings.TrimSpace(result.SummaryState)
+		if summaryState == "" {
+			summaryState = "unknown"
+		}
+		lines = append(lines, "Summary state: "+summaryState+".")
 	}
 	// Team-task ledger echo (plan §C3-4 统一返回契约 / AC-P2-4g): the compact
 	// summary must carry the same pending/terminal view the structured payload
@@ -72,14 +116,17 @@ func waitTeamCacheSafeSummary(result WaitTeamResult) string {
 	if nextAction := strings.TrimSpace(result.NextAction); nextAction != "" {
 		lines = append(lines, "Next action: "+nextAction+".")
 	}
-	if result.SummaryReady {
-		lines = append(lines, "Summary is ready.")
-	}
-	if summary := truncateCacheSafeSummary(result.Summary, 420); summary != "" {
-		lines = append(lines, "Summary: "+summary)
+	if result.SummaryState == "ready" && result.SummaryReady {
+		lines = append(lines, "Final summary is ready.")
+		if summary := truncateCacheSafeSummary(result.Summary, 420); summary != "" {
+			lines = append(lines, "Final summary: "+summary)
+		}
 	}
 	if result.EventCount > 0 {
-		lines = append(lines, fmt.Sprintf("Returned %d lifecycle events. Latest seq=%d.", result.EventCount, result.LatestSeq))
+		lines = append(lines, fmt.Sprintf(
+			"Returned %d lifecycle events. Continue with next_cursor=%d; latest_seq=%d is only the durable high-water mark.",
+			result.EventCount, result.NextCursor, result.LatestSeq,
+		))
 	}
 	return strings.Join(lines, "\n")
 }

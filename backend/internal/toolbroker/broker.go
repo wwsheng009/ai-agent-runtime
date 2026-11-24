@@ -1066,7 +1066,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 	definitions = append(definitions,
 		types.ToolDefinition{
 			Name:        ToolTeamSpawn,
-			Description: "Create a team with optional teammates and tasks. Use when the user asks to spin up a team or delegate work to multiple agents. If auto_start is true, the team starts running immediately in the background.",
+			Description: "Create or reuse a legacy Team with optional teammates and tasks. Use when the user asks to spin up a team or delegate work to multiple agents. If auto_start is true, this requests host Team lifecycle synchronization; it does not prove that workers are ready or executing. Check start_result.status and capabilities in the receipt, and use team_wait to observe persisted state when lifecycle synchronization was requested.",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -1104,7 +1104,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 					},
 					"auto_start": map[string]interface{}{
 						"type":        "boolean",
-						"description": "Whether to auto-start team orchestration loop if available. Defaults to true. When true, delegated work is already running, so the assistant should not ask the user to pick the next step before that background work settles.",
+						"description": "Whether to request host synchronization of the legacy Team lifecycle. Defaults to true. A lifecycle_sync_requested status is not proof that a worker is ready or executing; unavailable means no lifecycle trigger was issued. Check the structured start_result.",
 					},
 					"teammates": map[string]interface{}{
 						"type": "array",
@@ -1210,7 +1210,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 		},
 		types.ToolDefinition{
 			Name:        ToolTeamWait,
-			Description: "Wait for a team_spawn run to reach durable team.completed/team.summary state and return recent persisted team lifecycle events. Use this after team_spawn auto_start=true instead of subagent_wait/subagent_events; those are only for subagent_spawn child sessions. " + agentguidance.WaitDisciplineText(),
+			Description: "Wait for a team_spawn run for one bounded observation window and return recent persisted team lifecycle events. For continuation, pass the returned next_cursor back as after_seq; latest_seq is only the durable Team high-water mark and may be beyond the returned event page, so never use latest_seq as the continuation cursor. A timeout only ends this observation and never marks the Team failed. Team terminal state and summary state are independent: show a final summary only when summary_state=ready; report pending/failed separately, and do not offer summary retry unless a supported action is exposed. Use this after team_spawn auto_start=true instead of subagent_wait/subagent_events; those are only for subagent_spawn child sessions. " + agentguidance.WaitDisciplineText(),
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -1220,7 +1220,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 					},
 					"after_seq": map[string]interface{}{
 						"type":        "integer",
-						"description": "Only include persisted team events after this team event sequence.",
+						"description": "Only include persisted team events after this Team-local sequence. On continuation, pass the previous result's next_cursor; latest_seq is a high-water mark and may skip events if used here.",
 					},
 					"timeout_ms": map[string]interface{}{
 						"type":        "integer",
@@ -1372,10 +1372,11 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 						"type":        "string",
 						"description": "Optional task id override; defaults to the current run task.",
 					},
-					"task_status": reportOutcomeProperties["task_status"],
-					"summary":     reportOutcomeProperties["summary"],
-					"blocker":     reportOutcomeProperties["blocker"],
-					"handoff_to":  reportOutcomeProperties["handoff_to"],
+					"task_status":   reportOutcomeProperties["task_status"],
+					"summary":       reportOutcomeProperties["summary"],
+					"blocker":       reportOutcomeProperties["blocker"],
+					"handoff_to":    reportOutcomeProperties["handoff_to"],
+					"fencing_token": reportOutcomeProperties["fencing_token"],
 					"result_ref": map[string]interface{}{
 						"type":        "string",
 						"description": "Optional result reference stored on the task for done or failed outcomes.",
@@ -1414,9 +1415,10 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 						"type":        "string",
 						"description": "Outcome summary. Legacy shorthand when no structured status fields are provided.",
 					},
-					"task_status": blockOutcomeProperties["task_status"],
-					"blocker":     blockOutcomeProperties["blocker"],
-					"handoff_to":  blockOutcomeProperties["handoff_to"],
+					"task_status":   blockOutcomeProperties["task_status"],
+					"blocker":       blockOutcomeProperties["blocker"],
+					"handoff_to":    blockOutcomeProperties["handoff_to"],
+					"fencing_token": blockOutcomeProperties["fencing_token"],
 					"notify_lead": map[string]interface{}{
 						"type":        "boolean",
 						"description": "Whether to send a mailbox message to the lead or handoff target. Defaults to true.",
@@ -3538,26 +3540,78 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		}
 
 		autoStarted := false
+		startResult := SpawnTeamStartResult{
+			Requested: autoStart,
+			Status:    "not_requested",
+		}
 		if autoStart {
-			b.notifyTeamLifecycleChanged()
-			autoStarted = true
+			if b.TeamLifecycleChanged == nil {
+				startResult.Status = "unavailable"
+				startResult.NextAction = "execution was not triggered because this broker has no Team lifecycle host; configure the host before relying on background execution"
+			} else {
+				b.notifyTeamLifecycleChanged()
+				autoStarted = true
+				startResult.Status = "lifecycle_sync_requested"
+			}
+		}
+		preflightResult := SpawnTeamPreflightResult{
+			Status:     "not_run",
+			Capability: "unsupported",
+			Reason:     "team_spawn uses the legacy Team compatibility path and does not evaluate an independent product Team Run preflight",
+		}
+		capabilities := map[string]string{
+			"team_wait":               "supported",
+			"team_event_cursor":       "unsupported",
+			"team_lifecycle_sync":     "unsupported",
+			"product_run_resource":    "unsupported",
+			"product_run_preflight":   "unsupported",
+			"independent_run_history": "unsupported",
+		}
+		if b.TeamLifecycleChanged != nil {
+			capabilities["team_lifecycle_sync"] = "supported"
 		}
 		rawMeta := map[string]interface{}{
-			"team_id":      teamID,
-			"created_team": createdTeam,
-			"auto_started": autoStarted,
+			"operation":            ToolTeamSpawn,
+			"team_id":              teamID,
+			"run_id":               teamID,
+			"compatibility_mode":   "legacy_team_view",
+			"created_team":         createdTeam,
+			"auto_start_requested": autoStart,
+			"auto_started":         autoStarted,
+			"start_result":         startResult,
+			"preflight":            preflightResult,
+			"capabilities":         capabilities,
 		}
 		if len(taskIDs) == 1 {
 			rawMeta["task_id"] = taskIDs[0]
 		}
 		result := SpawnTeamResult{
-			TeamID:        teamID,
-			CreatedTeam:   createdTeam,
-			AutoStarted:   autoStarted,
-			TeammateIDs:   teammateIDs,
-			TaskIDs:       taskIDs,
-			TeammateCount: len(teammateIDs),
-			TaskCount:     len(taskIDs),
+			Operation:          ToolTeamSpawn,
+			TeamID:             teamID,
+			RunID:              teamID,
+			CompatibilityMode:  "legacy_team_view",
+			Capabilities:       capabilities,
+			Preflight:          preflightResult,
+			StartResult:        startResult,
+			CreatedTeam:        createdTeam,
+			AutoStartRequested: autoStart,
+			AutoStarted:        autoStarted,
+			TeammateIDs:        teammateIDs,
+			TaskIDs:            taskIDs,
+			TeammateCount:      len(teammateIDs),
+			TaskCount:          len(taskIDs),
+		}
+		if sequenceStore, ok := b.TeamStore.(team.TeamEventSequenceStore); ok {
+			if eventSeq, err := sequenceStore.LastTeamEventSeq(ctx, teamID); err == nil {
+				result.EventSeq = eventSeq
+				result.Capabilities["team_event_cursor"] = "supported"
+				rawMeta["event_seq"] = eventSeq
+			} else {
+				// Keep the distinction between stores without the cursor contract
+				// and stores whose cursor read failed for this invocation.
+				result.Capabilities["team_event_cursor"] = "unavailable"
+			}
+			rawMeta["capabilities"] = result.Capabilities
 		}
 		return result, attachCacheSafeSummary(rawMeta, spawnTeamCacheSafeSummary(result)), nil
 
@@ -3593,6 +3647,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			"status":          result.Status,
 			"terminal":        result.Terminal,
 			"summary_ready":   result.SummaryReady,
+			"summary_state":   result.SummaryState,
 			"timed_out":       result.TimedOut,
 			"wait_timeout_ms": result.WaitTimeoutMs,
 			// Same echo as subagent_wait: the model must be able to see that its
@@ -3601,6 +3656,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			"wait_timeout_clamped":      result.WaitTimeoutClamped,
 			"execution_continues":       result.ExecutionContinues,
 			"next_action":               result.NextAction,
+			"next_cursor":               result.NextCursor,
 			"latest_seq":                result.LatestSeq,
 			// Same ledger echo as subagent_wait: pending_count is the number of
 			// non-terminal task rows in the team view (plan §C3-4 / AC-P2-4g).
@@ -3877,6 +3933,9 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if value, ok := args["handoff_to"].(string); ok {
 			request.HandoffTo = strings.TrimSpace(value)
 		}
+		if value, ok := args["fencing_token"].(string); ok {
+			request.FencingToken = strings.TrimSpace(value)
+		}
 		if value, ok := args["notify_lead"].(bool); ok {
 			request.NotifyLead = &value
 		}
@@ -3909,6 +3968,9 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		}
 		if value, ok := args["handoff_to"].(string); ok {
 			request.HandoffTo = strings.TrimSpace(value)
+		}
+		if value, ok := args["fencing_token"].(string); ok {
+			request.FencingToken = strings.TrimSpace(value)
 		}
 		if value, ok := args["result_ref"].(string); ok {
 			request.ResultRef = strings.TrimSpace(value)
@@ -4681,8 +4743,13 @@ func (b *Broker) executeWaitTeam(ctx context.Context, sessionID string, request 
 		if err != nil {
 			return WaitTeamResult{}, err
 		}
-		if result.Terminal && (!b.waitTeamRequiresSummary(request) || result.SummaryReady) {
+		if result.Terminal && (!b.waitTeamRequiresSummary(request) || waitTeamSummaryResolved(result)) {
 			result = *ApplyWaitTeamTimeout(&result, resolution.RequestedMs, request.TimeoutMs, resolution.Clamped)
+			if result.SummaryState == "failed" {
+				result.NextAction = "team execution is terminal and final summary generation failed; inspect summary_payload for diagnostics; this tool does not expose a summary retry action"
+			} else if result.SummaryState == "pending" && !b.waitTeamRequiresSummary(request) {
+				result.NextAction = "team execution is terminal and summary is still pending; this wait did not require summary readiness, and no summary retry action is exposed"
+			}
 			withLedger, ledgerOK := attachLedger(result)
 			return stampWaited(observeBudget(withLedger, ledgerOK)), nil
 		}
@@ -4747,19 +4814,25 @@ func finalizeWaitTeamTimeout(result WaitTeamResult, resolution agentcontrol.Wait
 	result.ExecutionContinues = !result.Terminal
 	if result.ExecutionContinues {
 		result.NextAction = "team execution continues; wait timeout only ended this observation. Continue independent work or inspect current team status before waiting again"
+	} else if result.Terminal && result.SummaryState == "failed" {
+		result.NextAction = "team execution is terminal and final summary generation failed; inspect summary_payload for diagnostics; this tool does not expose a summary retry action"
 	} else if result.Terminal && !result.SummaryReady {
-		result.NextAction = "team execution is terminal but summary is not ready; wait again only if the summary is still required"
+		result.NextAction = "team execution is terminal but summary is not ready; this observation ended without changing Team state; wait again only if summary readiness is still required"
 	} else {
 		result.NextAction = "consume the terminal team result"
 	}
 	return result
 }
 
+func waitTeamSummaryResolved(result WaitTeamResult) bool {
+	return result.SummaryReady || result.SummaryState == "failed"
+}
+
 func (b *Broker) waitTeamRequiresSummary(request WaitTeamArgs) bool {
 	if request.RequireSummary != nil {
 		return *request.RequireSummary
 	}
-	return true
+	return b != nil && b.TeamPlanner != nil
 }
 
 func (b *Broker) readWaitTeamSnapshot(ctx context.Context, teamID string, request WaitTeamArgs) (WaitTeamResult, error) {
@@ -4779,10 +4852,11 @@ func (b *Broker) readWaitTeamSnapshot(ctx context.Context, teamID string, reques
 		return WaitTeamResult{}, err
 	}
 	result := WaitTeamResult{
-		TeamID:   strings.TrimSpace(record.ID),
-		Status:   string(record.Status),
-		Terminal: team.IsTerminalTeamStatus(record.Status),
-		Events:   make([]WaitTeamEventResult, 0, len(events)),
+		TeamID:     strings.TrimSpace(record.ID),
+		Status:     string(record.Status),
+		Terminal:   team.IsTerminalTeamStatus(record.Status),
+		Events:     make([]WaitTeamEventResult, 0, len(events)),
+		NextCursor: request.AfterSeq,
 	}
 	for _, event := range events {
 		item := WaitTeamEventResult{
@@ -4796,6 +4870,9 @@ func (b *Broker) readWaitTeamSnapshot(ctx context.Context, teamID string, reques
 		if item.Seq > result.LatestSeq {
 			result.LatestSeq = item.Seq
 		}
+		if item.Seq > result.NextCursor {
+			result.NextCursor = item.Seq
+		}
 		if item.Type == "team.summary" {
 			result.SummaryReady = true
 			result.SummaryEventSeq = item.Seq
@@ -4805,37 +4882,72 @@ func (b *Broker) readWaitTeamSnapshot(ctx context.Context, teamID string, reques
 		}
 	}
 	result.EventCount = len(result.Events)
-	if !result.SummaryReady {
-		if summaryEvent, summaryErr := b.latestTeamSummaryEvent(ctx, teamID); summaryErr != nil {
-			return WaitTeamResult{}, summaryErr
-		} else if summaryEvent != nil {
+	summaryEvent, summaryErr := b.latestTeamSummaryStateEvent(ctx, teamID)
+	if summaryErr != nil {
+		return WaitTeamResult{}, summaryErr
+	}
+	if summaryEvent != nil {
+		result.SummaryEventSeq = summaryEvent.Seq
+		result.SummaryPayload = cloneAliasPayloadMap(summaryEvent.Payload)
+		if summaryEvent.Seq > result.LatestSeq {
+			result.LatestSeq = summaryEvent.Seq
+		}
+		if summaryEvent.Type == "team.summary.failed" {
+			result.SummaryReady = false
+			result.SummaryState = "failed"
+			result.Summary = ""
+			result.SummarySource = ""
+		} else {
 			result.SummaryReady = true
-			result.SummaryEventSeq = summaryEvent.Seq
 			result.Summary = payloadString(summaryEvent.Payload, "summary")
 			result.SummarySource = payloadString(summaryEvent.Payload, "summary_source")
-			result.SummaryPayload = cloneAliasPayloadMap(summaryEvent.Payload)
-			if summaryEvent.Seq > result.LatestSeq {
-				result.LatestSeq = summaryEvent.Seq
+			if strings.TrimSpace(payloadString(summaryEvent.Payload, "error_type")) != "" {
+				// A fallback summary can be usable while still reporting that
+				// primary summary generation failed; preserve both facts.
+				result.SummaryState = "failed"
+			} else {
+				result.SummaryState = "ready"
 			}
+		}
+	}
+	if sequenceStore, ok := b.TeamStore.(team.TeamEventSequenceStore); ok {
+		latestSeq, sequenceErr := sequenceStore.LastTeamEventSeq(ctx, teamID)
+		if sequenceErr != nil {
+			return WaitTeamResult{}, sequenceErr
+		}
+		if latestSeq > result.LatestSeq {
+			result.LatestSeq = latestSeq
+		}
+	}
+	if summaryEvent == nil {
+		switch {
+		case result.Terminal:
+			result.SummaryState = "pending"
+		default:
+			result.SummaryState = "not_applicable"
 		}
 	}
 	return result, nil
 }
 
-func (b *Broker) latestTeamSummaryEvent(ctx context.Context, teamID string) (*team.TeamEventRecord, error) {
-	events, err := b.TeamStore.ListTeamEvents(ctx, team.TeamEventFilter{
-		TeamID:    strings.TrimSpace(teamID),
-		EventType: "team.summary",
-		Limit:     100,
-	})
-	if err != nil {
-		return nil, err
+func (b *Broker) latestTeamSummaryStateEvent(ctx context.Context, teamID string) (*team.TeamEventRecord, error) {
+	var latest *team.TeamEventRecord
+	for _, eventType := range []string{"team.summary", "team.summary.failed"} {
+		events, err := b.TeamStore.ListTeamEvents(ctx, team.TeamEventFilter{
+			TeamID:    strings.TrimSpace(teamID),
+			EventType: eventType,
+		})
+		if err != nil {
+			return nil, err
+		}
+		for index := range events {
+			if latest == nil || events[index].Seq > latest.Seq {
+				record := events[index]
+				latest = &record
+			}
+		}
 	}
-	if len(events) == 0 {
-		return nil, nil
-	}
-	latest := events[len(events)-1]
-	return &latest, nil
+	return latest, nil
 }
 
 func firstNonEmptyString(values ...string) string {
@@ -5011,8 +5123,14 @@ func (b *Broker) executeReportTaskOutcome(ctx context.Context, sessionID string,
 	if err := team.ValidateAllowedTaskOutcomeStatus(outcome, allowed...); err != nil {
 		return ReportTaskOutcomeResult{}, nil, err
 	}
-	route := team.TaskExecutionRouteFromRunMeta(activeRunMeta(ctx))
-
+	runMeta := activeRunMeta(ctx)
+	route := team.TaskExecutionRouteFromRunMeta(runMeta)
+	fencingToken := strings.TrimSpace(request.FencingToken)
+	if fencingToken == "" && runMeta != nil && runMeta.Team != nil &&
+		strings.EqualFold(strings.TrimSpace(runMeta.Team.TeamID), strings.TrimSpace(teamID)) &&
+		strings.TrimSpace(runMeta.Team.CurrentTaskID) == strings.TrimSpace(task.ID) {
+		fencingToken = strings.TrimSpace(runMeta.Team.FencingToken)
+	}
 	switch outcome.Status {
 	case team.TaskOutcomeDone, team.TaskOutcomeFailed:
 		applyOutcome := outcome
@@ -5031,6 +5149,7 @@ func (b *Broker) executeReportTaskOutcome(ctx context.Context, sessionID string,
 		}, team.TerminalTaskOutcomeRequest{
 			Task:            *task,
 			TeammateID:      agentID,
+			FencingToken:    fencingToken,
 			Outcome:         applyOutcome,
 			ResultRef:       resultRef,
 			Route:           route.Clone(),
@@ -5099,6 +5218,7 @@ func (b *Broker) executeReportTaskOutcome(ctx context.Context, sessionID string,
 			Team:            *teamRecord,
 			Task:            *task,
 			TeammateID:      agentID,
+			FencingToken:    fencingToken,
 			Outcome:         applyOutcome,
 			Route:           route.Clone(),
 			NotifyRecipient: request.NotifyLead,

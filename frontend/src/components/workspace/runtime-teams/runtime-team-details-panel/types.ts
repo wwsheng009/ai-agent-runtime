@@ -51,9 +51,11 @@ export type RuntimeTeamDetailsPanelProps = {
 export type TeamDetailsSectionId =
   | "roster"
   | "tasks"
+  | "preflight"
   | "mailbox"
   | "claims"
   | "timeline"
+  | "results"
   | "summary";
 
 export type TeamDetailsSectionState = Record<TeamDetailsSectionId, boolean>;

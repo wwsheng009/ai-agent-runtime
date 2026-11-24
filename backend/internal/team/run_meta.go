@@ -7,6 +7,7 @@ type TeamRunMeta struct {
 	TeamID               string   `json:"team_id,omitempty"`
 	AgentID              string   `json:"agent_id,omitempty"`
 	CurrentTaskID        string   `json:"current_task_id,omitempty"`
+	FencingToken         string   `json:"fencing_token,omitempty"`
 	Difficulty           string   `json:"difficulty,omitempty"`
 	DifficultySource     string   `json:"difficulty_source,omitempty"`
 	DifficultyRationale  string   `json:"difficulty_rationale,omitempty"`

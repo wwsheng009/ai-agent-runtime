@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import {
   listRuntimeTeams,
@@ -21,20 +21,28 @@ export function useRuntimeTeamsData({
   const [runtimeTeamsError, setRuntimeTeamsError] = useState<string | null>(null);
   const [runtimeTeamsLoading, setRuntimeTeamsLoading] = useState(true);
   const [runtimeTeamsRefreshing, setRuntimeTeamsRefreshing] = useState(false);
+  const requestControllerRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     let cancelled = false;
+    requestControllerRef.current?.abort();
+    const controller = new AbortController();
+    requestControllerRef.current = controller;
 
     void (async () => {
       setRuntimeTeamsLoading(true);
 
       try {
         const [teamsResponse, summariesResponse] = await Promise.all([
-          listRuntimeTeams({ limit }),
-          listRuntimeTeamSummaries({ limit, light: true }),
+          listRuntimeTeams({ limit, signal: controller.signal }),
+          listRuntimeTeamSummaries({
+            limit,
+            light: true,
+            signal: controller.signal,
+          }),
         ]);
 
-        if (cancelled) {
+        if (cancelled || controller.signal.aborted) {
           return;
         }
 
@@ -42,7 +50,7 @@ export function useRuntimeTeamsData({
         setRuntimeTeamSummaries(summariesResponse.teams);
         setRuntimeTeamsError(null);
       } catch (error) {
-        if (cancelled) {
+        if (cancelled || controller.signal.aborted) {
           return;
         }
 
@@ -50,7 +58,11 @@ export function useRuntimeTeamsData({
           error instanceof Error ? error.message : "failed to load runtime teams";
         setRuntimeTeamsError(message);
       } finally {
-        if (!cancelled) {
+        if (
+          !cancelled &&
+          !controller.signal.aborted &&
+          requestControllerRef.current === controller
+        ) {
           setRuntimeTeamsLoading(false);
           setRuntimeTeamsRefreshing(false);
         }
@@ -59,29 +71,58 @@ export function useRuntimeTeamsData({
 
     return () => {
       cancelled = true;
+      requestControllerRef.current?.abort();
+      controller.abort();
+      if (requestControllerRef.current === controller) {
+        requestControllerRef.current = null;
+      }
     };
   }, [limit]);
 
   function refreshRuntimeTeams() {
+    requestControllerRef.current?.abort();
+    const controller = new AbortController();
+    requestControllerRef.current = controller;
     setRuntimeTeamsRefreshing(true);
     setRuntimeTeamsError(null);
 
     void Promise.all([
-      listRuntimeTeams({ limit }),
-      listRuntimeTeamSummaries({ limit, light: true }),
+      listRuntimeTeams({ limit, signal: controller.signal }),
+      listRuntimeTeamSummaries({
+        limit,
+        light: true,
+        signal: controller.signal,
+      }),
     ])
       .then(([teamsResponse, summariesResponse]) => {
+        if (
+          controller.signal.aborted ||
+          requestControllerRef.current !== controller
+        ) {
+          return;
+        }
         setRuntimeTeams(teamsResponse.teams);
         setRuntimeTeamSummaries(summariesResponse.teams);
       })
       .catch((error) => {
+        if (
+          controller.signal.aborted ||
+          requestControllerRef.current !== controller
+        ) {
+          return;
+        }
         const message =
           error instanceof Error ? error.message : "failed to refresh runtime teams";
         setRuntimeTeamsError(message);
       })
       .finally(() => {
-        setRuntimeTeamsLoading(false);
-        setRuntimeTeamsRefreshing(false);
+        if (
+          !controller.signal.aborted &&
+          requestControllerRef.current === controller
+        ) {
+          setRuntimeTeamsLoading(false);
+          setRuntimeTeamsRefreshing(false);
+        }
       });
   }
 

@@ -7,6 +7,9 @@ import {
   type RuntimeTaskGraphResponse,
   type RuntimeTeamEventRecord,
   type RuntimeTeamMailboxMessage,
+  type RuntimeTeamPreflightResponse,
+  type RuntimeTeamSummaryEntry,
+  type RuntimeTeamSummaryState,
   type RuntimeTeamTask,
   type RuntimeTeammateRecord,
 } from "@/lib/runtime-api";
@@ -98,10 +101,17 @@ export type MultiTeamDispatchResult = {
 
 export type TeamDetailsState = {
   events: RuntimeTeamEventRecord[];
+  eventCursor: number;
+  latestEventSeq: number;
+  liveTeamStatus?: string;
+  liveSummary?: RuntimeTeamSummaryEntry;
   finalSummary: string;
+  summaryState: RuntimeTeamSummaryState;
   graph: RuntimeTaskGraphResponse | null;
   mailbox: RuntimeTeamMailboxMessage[];
   pathClaims: RuntimePathClaimRecord[];
   tasks: RuntimeTeamTask[];
   teammates: RuntimeTeammateRecord[];
+  preflight: RuntimeTeamPreflightResponse | null;
+  isStale: boolean;
 };

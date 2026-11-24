@@ -160,6 +160,7 @@ func (s *handlerTeamLifecycleService) ReplayStoredTerminalEvents(teamID string) 
 	if store == nil {
 		return
 	}
+	s.handler.projectTeamRunTerminalState(teamID)
 	events, err := store.ListTeamEvents(context.Background(), team.TeamEventFilter{
 		TeamID: strings.TrimSpace(teamID),
 		Limit:  16,

@@ -128,10 +128,19 @@ func TestOrchestratorStaleOwnerCannotClaim(t *testing.T) {
 	teamID, err := store.CreateTeam(ctx, Team{Status: TeamStatusActive})
 	require.NoError(t, err)
 	mateID, err := store.UpsertTeammate(ctx, Teammate{
-		ID:     "mate-a",
-		TeamID: teamID,
-		Name:   "mate-a",
-		State:  TeammateStateIdle,
+		ID:        "mate-a",
+		TeamID:    teamID,
+		Name:      "mate-a",
+		SessionID: "session-mate-a",
+		State:     TeammateStateIdle,
+	})
+	require.NoError(t, err)
+	alternateMateID, err := store.UpsertTeammate(ctx, Teammate{
+		ID:        "mate-b",
+		TeamID:    teamID,
+		Name:      "mate-b",
+		SessionID: "session-mate-b",
+		State:     TeammateStateIdle,
 	})
 	require.NoError(t, err)
 	createReady := func(title string) string {
@@ -184,7 +193,7 @@ func TestOrchestratorStaleOwnerCannotClaim(t *testing.T) {
 		ID:         task2,
 		Workflow:   agentcontrol.WorkflowSpawnTeam,
 		TeamID:     teamID,
-		Assignee:   mateID,
+		Assignee:   alternateMateID,
 		LeaseUntil: leaseUntil,
 		OwnerID:    "owner-a",
 		OwnerToken: leaseA.FencingToken,
@@ -196,7 +205,7 @@ func TestOrchestratorStaleOwnerCannotClaim(t *testing.T) {
 		ID:         task2,
 		Workflow:   agentcontrol.WorkflowSpawnTeam,
 		TeamID:     teamID,
-		Assignee:   mateID,
+		Assignee:   alternateMateID,
 		LeaseUntil: leaseUntil,
 		OwnerID:    "owner-b",
 		OwnerToken: leaseB.FencingToken,
@@ -210,6 +219,71 @@ func TestOrchestratorStaleOwnerCannotClaim(t *testing.T) {
 	valid, err = store.ValidateOrchestratorOwner(ctx, teamID, "owner-b", leaseB.FencingToken)
 	require.NoError(t, err)
 	require.True(t, valid, "current owner token must validate")
+}
+
+func TestSQLiteOwnerFencedClaimChecksLeaseAtCommitBoundary(t *testing.T) {
+	for _, usePathClaims := range []bool{false, true} {
+		name := "without_path_claims"
+		if usePathClaims {
+			name = "with_path_claims"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			store := newTestStore(t)
+			teamID, err := store.CreateTeam(ctx, Team{Status: TeamStatusActive})
+			require.NoError(t, err)
+			_, err = store.UpsertTeammate(ctx, Teammate{
+				ID:        "mate-a",
+				TeamID:    teamID,
+				SessionID: "session-a",
+				State:     TeammateStateIdle,
+			})
+			require.NoError(t, err)
+			taskID, err := store.CreateTask(ctx, Task{
+				TeamID:     teamID,
+				Title:      "owner fenced claim",
+				Status:     TaskStatusReady,
+				WritePaths: []string{"src/fenced.go"},
+			})
+			require.NoError(t, err)
+			task, err := store.GetTask(ctx, taskID)
+			require.NoError(t, err)
+			require.NotNil(t, task)
+
+			lease, acquired, err := store.AcquireOrchestratorLease(ctx, OrchestratorLease{
+				TeamID:  teamID,
+				OwnerID: "owner-a",
+			}, time.Minute)
+			require.NoError(t, err)
+			require.True(t, acquired)
+			expireLease(t, store, teamID)
+
+			var claimed bool
+			if usePathClaims {
+				claimed, err = store.ClaimTaskWithPathClaimsAndOwnerFence(
+					ctx, *task, "mate-a", time.Now().UTC().Add(time.Minute), "workspace", "owner-a", lease.FencingToken,
+				)
+			} else {
+				claimed, err = store.ClaimTaskWithOwnerFence(
+					ctx, taskID, "mate-a", time.Now().UTC().Add(time.Minute), task.Version, "owner-a", lease.FencingToken,
+				)
+			}
+			require.NoError(t, err)
+			require.False(t, claimed, "an expired owner lease must not pass the transactional claim predicate")
+
+			current, err := store.GetTask(ctx, taskID)
+			require.NoError(t, err)
+			require.NotNil(t, current)
+			require.Equal(t, TaskStatusReady, current.Status)
+			mate, err := store.GetTeammate(ctx, "mate-a")
+			require.NoError(t, err)
+			require.NotNil(t, mate)
+			require.Equal(t, TeammateStateIdle, mate.State)
+			claims, err := store.ListPathClaims(ctx, teamID)
+			require.NoError(t, err)
+			require.Empty(t, claims)
+		})
+	}
 }
 
 // TestOrchestratorLeaseRenewExtends verifies that renewal extends the lease
@@ -292,10 +366,11 @@ func TestOrchestratorRunWithWakeClaimAndReleaseOnExit(t *testing.T) {
 	teamID, err := store.CreateTeam(ctx, Team{Status: TeamStatusActive})
 	require.NoError(t, err)
 	_, err = store.UpsertTeammate(ctx, Teammate{
-		ID:     "mate-a",
-		TeamID: teamID,
-		Name:   "mate-a",
-		State:  TeammateStateIdle,
+		ID:        "mate-a",
+		TeamID:    teamID,
+		Name:      "mate-a",
+		SessionID: "session-mate-a",
+		State:     TeammateStateIdle,
 	})
 	require.NoError(t, err)
 	taskID, err := store.CreateTask(ctx, Task{
@@ -356,31 +431,49 @@ func TestOrchestratorNewOwnerResumesHealthReconcile(t *testing.T) {
 	teamID, err := store.CreateTeam(ctx, Team{Status: TeamStatusActive})
 	require.NoError(t, err)
 	mateID, err := store.UpsertTeammate(ctx, Teammate{
-		ID:     "mate-a",
-		TeamID: teamID,
-		Name:   "mate-a",
-		State:  TeammateStateBusy,
+		ID:        "mate-a",
+		TeamID:    teamID,
+		Name:      "mate-a",
+		SessionID: "session-mate-a",
+		State:     TeammateStateIdle,
 	})
 	require.NoError(t, err)
-	// A task whose attempt lease expired while its owner was alive.
-	expired := time.Now().UTC().Add(-time.Minute)
 	taskID, err := store.CreateTask(ctx, Task{
-		TeamID:     teamID,
-		Title:      "stale-attempt",
-		Goal:       "run",
-		Status:     TaskStatusRunning,
-		Assignee:   &mateID,
-		LeaseUntil: &expired,
+		TeamID: teamID,
+		Title:  "stale-attempt",
+		Goal:   "run",
+		Status: TaskStatusReady,
 	})
 	require.NoError(t, err)
 
-	// Old owner acquires the lease, then crashes without releasing.
-	_, acquired, err := store.AcquireOrchestratorLease(ctx, OrchestratorLease{
+	// A valid old owner claims the task, then crashes without releasing.
+	oldLease, acquired, err := store.AcquireOrchestratorLease(ctx, OrchestratorLease{
 		TeamID:  teamID,
 		OwnerID: "owner-a",
 	}, 2*time.Second)
 	require.NoError(t, err)
 	require.True(t, acquired)
+	registry := NewAgentControlTaskRegistry(store)
+	claim, claimed, err := registry.ClaimAgentControlTask(ctx, agentcontrol.TaskClaimRequest{
+		ID:         taskID,
+		Workflow:   agentcontrol.WorkflowSpawnTeam,
+		TeamID:     teamID,
+		Assignee:   mateID,
+		LeaseUntil: time.Now().UTC().Add(5 * time.Minute),
+		OwnerID:    oldLease.OwnerID,
+		OwnerToken: oldLease.FencingToken,
+	})
+	require.NoError(t, err)
+	require.True(t, claimed)
+	require.NotNil(t, claim)
+	expired := time.Now().UTC().Add(-time.Minute)
+	_, err = registry.RenewAgentControlTaskLease(ctx, agentcontrol.TaskLeaseRenewRequest{
+		ID:           taskID,
+		Workflow:     agentcontrol.WorkflowSpawnTeam,
+		LeaseUntil:   expired,
+		FencingToken: claim.FencingToken,
+	})
+	require.NoError(t, err)
 	expireLease(t, store, teamID)
 
 	// New owner takes over and must reclaim the stale attempt.

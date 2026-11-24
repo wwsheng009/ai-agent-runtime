@@ -56,6 +56,10 @@ func TaskOutcomeContractSchemaFor(allowed ...TaskOutcomeStatus) map[string]inter
 				"type":        "string",
 				"description": "Required only when task_status=handoff.",
 			},
+			"fencing_token": map[string]interface{}{
+				"type":        "string",
+				"description": "Optional claim fencing token for the current task attempt.",
+			},
 			"result_contract": map[string]interface{}{
 				"type":        "object",
 				"description": "Optional shared agent result contract; the runtime fills it when omitted.",

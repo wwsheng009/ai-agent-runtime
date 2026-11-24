@@ -75,7 +75,7 @@ func ReconcileTerminalTeamState(ctx context.Context, services TerminalTeamServic
 
 	active, err := services.Store.ListTasks(ctx, TaskFilter{
 		TeamID: teamID,
-		Status: []TaskStatus{TaskStatusPending, TaskStatusReady, TaskStatusRunning, TaskStatusBlocked},
+		Status: []TaskStatus{TaskStatusPending, TaskStatusReady, TaskStatusRunning, TaskStatusBlocked, TaskStatusReclaimPending},
 	})
 	if err != nil {
 		return nil, err
@@ -146,7 +146,7 @@ func reconcileTerminalTeamStateSQLite(ctx context.Context, store *SQLiteStore, s
 				return nil
 			}
 
-			activeCount, err := countTasksByStatusTx(ctx, tx, teamID, TaskStatusPending, TaskStatusReady, TaskStatusRunning, TaskStatusBlocked)
+			activeCount, err := countTasksByStatusTx(ctx, tx, teamID, TaskStatusPending, TaskStatusReady, TaskStatusRunning, TaskStatusBlocked, TaskStatusReclaimPending)
 			if err != nil {
 				return err
 			}
@@ -431,11 +431,16 @@ func applyPersistedTerminalSummary(ctx context.Context, store Store, teamID stri
 }
 
 func emitTerminalTeamEvent(store Store, events *TeamEventBus, event TeamEvent) {
-	if events != nil {
-		events.Publish(event)
-	}
 	if store != nil {
 		_, _ = store.AppendTeamEvent(context.Background(), event)
+	}
+	// Persist before publishing so subscribers that maintain a read model can
+	// observe the event they are handling. In particular, the TeamRun terminal
+	// projector queries the durable summary event while handling team.summary;
+	// publishing first would leave it permanently stuck at summary_state=pending
+	// when no later lifecycle event is emitted.
+	if events != nil {
+		events.Publish(event)
 	}
 }
 

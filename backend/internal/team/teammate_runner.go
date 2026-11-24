@@ -184,6 +184,7 @@ func (r *TeammateRunner) StartTask(ctx context.Context, team Team, mate Teammate
 			TeamID:        teamID,
 			AgentID:       strings.TrimSpace(mate.ID),
 			CurrentTaskID: strings.TrimSpace(task.ID),
+			FencingToken:  strings.TrimSpace(task.FencingToken),
 		},
 	}
 	applyRouteToTeamRunMeta(runMeta.Team, route)

@@ -50,7 +50,9 @@ export function RuntimeTeamSnapshot({
           </div>
         </div>
         <Badge>
-          {selectedTeam.status || t("panels.teamsPanels.details.statusUnknown")}
+          {details.liveTeamStatus ||
+            selectedTeam.status ||
+            t("panels.teamsPanels.details.statusUnknown")}
         </Badge>
       </div>
 
@@ -182,6 +184,44 @@ export function RuntimeTeamSnapshot({
       {detailsError ? (
         <div className="mt-3 rounded-[0.75rem] border border-accent-gold/18 bg-accent-gold/8 px-3 py-2.5 text-sm leading-6 text-muted-foreground">
           {detailsError}
+        </div>
+      ) : null}
+      {details.isStale ? (
+        <div
+          className="mt-2 rounded-[0.75rem] border border-border bg-surface-soft px-3 py-2 text-sm leading-6 text-muted-foreground"
+          role="status"
+        >
+          {t("panels.teamsPanels.details.snapshot.staleDetails")}
+        </div>
+      ) : null}
+      {details.preflight && !details.preflight.readiness ? (
+        <div
+          className="mt-2 rounded-[0.75rem] border border-accent-gold/18 bg-accent-gold/8 px-3 py-2 text-sm leading-6 text-muted-foreground"
+          role="status"
+        >
+          {t("panels.teamsPanels.details.snapshot.preflightBlocked", {
+            count: details.preflight.preflight.blocker_count,
+          })}
+        </div>
+      ) : null}
+      {details.preflight?.compatibility_mode === "legacy_team_view" ? (
+        <div
+          className="mt-2 rounded-[0.75rem] border border-border bg-surface-soft px-3 py-2 text-sm leading-6 text-muted-foreground"
+          role="status"
+        >
+          <p>
+            {t("panels.teamsPanels.details.snapshot.compatibilityMode", {
+              mode: details.preflight.compatibility_mode,
+            })}
+          </p>
+          {details.preflight.capabilities?.controlled_team_start ===
+          "unsupported" ? (
+            <p className="mt-1">
+              {t(
+                "panels.teamsPanels.details.snapshot.controlledStartUnsupported",
+              )}
+            </p>
+          ) : null}
         </div>
       ) : null}
     </>

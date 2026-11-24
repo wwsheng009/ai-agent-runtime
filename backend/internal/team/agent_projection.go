@@ -58,6 +58,7 @@ func ActiveTaskForAssignee(ctx context.Context, store Store, teamID, assignee st
 		Assignee: &assignee,
 		Status: []TaskStatus{
 			TaskStatusRunning,
+			TaskStatusReclaimPending,
 			TaskStatusReady,
 			TaskStatusBlocked,
 			TaskStatusPending,
@@ -168,12 +169,14 @@ func activeTaskStatusRank(status TaskStatus) int {
 	switch status {
 	case TaskStatusRunning:
 		return 0
-	case TaskStatusReady:
+	case TaskStatusReclaimPending:
 		return 1
-	case TaskStatusBlocked:
+	case TaskStatusReady:
 		return 2
-	case TaskStatusPending:
+	case TaskStatusBlocked:
 		return 3
+	case TaskStatusPending:
+		return 4
 	default:
 		return 100
 	}

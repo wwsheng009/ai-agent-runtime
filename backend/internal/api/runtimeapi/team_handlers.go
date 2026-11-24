@@ -3,6 +3,7 @@ package runtimeapi
 import (
 	"context"
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -173,6 +174,9 @@ func (h *Handler) getTeamOrchestrator() *team.Orchestrator {
 				Payload:   payload,
 				Timestamp: event.Timestamp,
 			})
+			if isTeamRunTerminalProjectionEvent(event.Type) {
+				h.projectTeamRunTerminalState(event.TeamID)
+			}
 			if strings.EqualFold(strings.TrimSpace(event.Type), "team.completed") {
 				if lifecycle := h.teamLifecycleService(); lifecycle != nil {
 					lifecycle.closeTerminalTeammatesAsync(event.TeamID)
@@ -242,6 +246,35 @@ func (h *Handler) getTeamEvents() *team.TeamEventBus {
 		return nil
 	}
 	return orchestrator.Events
+}
+
+func isTeamRunTerminalProjectionEvent(eventType string) bool {
+	switch strings.TrimSpace(eventType) {
+	case "team.completed", "team.summary", "team.summary.failed":
+		return true
+	default:
+		return false
+	}
+}
+
+// projectTeamRunTerminalState keeps the independent TeamRun read model aligned
+// with the legacy Team execution authority during the compatibility migration.
+// The durable Team events remain authoritative; supervisor settlement replays
+// this projection if a transient write failure occurs here.
+func (h *Handler) projectTeamRunTerminalState(teamID string) {
+	if h == nil {
+		return
+	}
+	projector, ok := h.getTeamStore().(team.TeamRunLifecycleProjector)
+	if !ok || projector == nil {
+		return
+	}
+	if err := projector.ProjectTeamRunTerminalState(context.Background(), teamID); err != nil {
+		h.publishRuntimeEvent("team.run.projection.failed", "", map[string]interface{}{
+			"team_id": strings.TrimSpace(teamID),
+			"error":   err.Error(),
+		})
+	}
 }
 
 func cloneTeamOrchestrator(orchestrator *team.Orchestrator) *team.Orchestrator {
@@ -484,6 +517,15 @@ func (h *Handler) resolveTeamMailboxSessionTargets(ctx context.Context, store te
 
 // ListTeams lists teams with optional filters.
 func (h *Handler) ListTeams(w http.ResponseWriter, r *http.Request) {
+	identity, scoped := legacyTeamIdentityFromRequest(r)
+	if !scoped && !legacyTeamLocalModeFromRequest(r) {
+		var ok bool
+		identity, ok = h.requireLegacyTeamIdentity(w, r)
+		if !ok {
+			return
+		}
+		scoped = true
+	}
 	store := h.getTeamStore()
 	if store == nil {
 		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid, "team store not configured"))
@@ -501,6 +543,14 @@ func (h *Handler) ListTeams(w http.ResponseWriter, r *http.Request) {
 	}
 	ids := parseIDList(r.URL.Query().Get("team_ids"))
 	workspaceID := strings.TrimSpace(r.URL.Query().Get("workspace_id"))
+	if scoped {
+		if workspaceID != "" && !strings.EqualFold(workspaceID, identity.WorkspaceID) {
+			rejectLegacyTeamWorkspaceMismatch(w, r)
+			return
+		}
+		// Query parameters are caller-controlled and cannot select a workspace.
+		workspaceID = identity.WorkspaceID
+	}
 	listLimit := limit
 	if len(ids) > 0 {
 		listLimit = 0
@@ -530,14 +580,32 @@ func (h *Handler) ListTeams(w http.ResponseWriter, r *http.Request) {
 			teams = teams[:limit]
 		}
 	}
-	h.writeJSON(w, http.StatusOK, map[string]interface{}{
-		"teams":        teams,
-		"count":        len(teams),
-		"limit":        limit,
-		"team_ids":     ids,
-		"workspace_id": workspaceID,
-		"status":       status,
-	})
+	visibleTeamIDs := make([]string, 0, len(teams))
+	for _, item := range teams {
+		if id := strings.TrimSpace(item.ID); id != "" {
+			visibleTeamIDs = append(visibleTeamIDs, id)
+		}
+	}
+	traceID, requestID := runtimeTraceIDForRequest(r)
+	w.Header().Set("X-Trace-ID", traceID)
+	response := map[string]interface{}{
+		"teams":              teams,
+		"count":              len(teams),
+		"limit":              limit,
+		"team_ids":           visibleTeamIDs,
+		"workspace_id":       workspaceID,
+		"status":             status,
+		"compatibility_mode": legacyTeamCompatibilityMode,
+		"team_version":       nil,
+		"version_supported":  false,
+		"cursor_scope":       "team_local",
+		"capabilities":       legacyTeamCapabilities(),
+		"trace_id":           traceID,
+	}
+	if requestID != "" {
+		response["request_id"] = requestID
+	}
+	h.writeJSON(w, http.StatusOK, response)
 }
 
 // ListTeamEvents lists persisted team events.
@@ -549,6 +617,9 @@ func (h *Handler) ListTeamEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	teamID := mux.Vars(r)["id"]
 	rawAfter := strings.TrimSpace(r.URL.Query().Get("after"))
+	if rawAfter == "" {
+		rawAfter = strings.TrimSpace(r.URL.Query().Get("after_seq"))
+	}
 	afterSeq := int64(0)
 	if rawAfter != "" {
 		value, err := strconv.ParseInt(rawAfter, 10, 64)
@@ -594,19 +665,46 @@ func (h *Handler) ListTeamEvents(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	latestSeq := afterSeq
+	if len(events) > 0 && events[len(events)-1].Seq > latestSeq {
+		latestSeq = events[len(events)-1].Seq
+	}
+	if sequenceStore, ok := store.(team.TeamEventSequenceStore); ok {
+		latestSeq, err = sequenceStore.LastTeamEventSeq(r.Context(), teamID)
+		if err != nil {
+			h.writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+	}
+	nextCursor := afterSeq
+	if len(events) > 0 {
+		nextCursor = events[len(events)-1].Seq
+	}
 	h.writeJSON(w, http.StatusOK, map[string]interface{}{
-		"team_id":    teamID,
-		"events":     events,
-		"after":      afterSeq,
-		"limit":      limit,
-		"event_type": eventType,
-		"since":      since,
-		"until":      until,
+		"team_id":     teamID,
+		"events":      events,
+		"after":       afterSeq,
+		"after_seq":   afterSeq,
+		"latest_seq":  latestSeq,
+		"next_cursor": nextCursor,
+		"limit":       limit,
+		"event_type":  eventType,
+		"since":       since,
+		"until":       until,
 	})
 }
 
 // CreateTeam creates a new team.
 func (h *Handler) CreateTeam(w http.ResponseWriter, r *http.Request) {
+	identity, scoped := legacyTeamIdentityFromRequest(r)
+	if !scoped && !legacyTeamLocalModeFromRequest(r) {
+		var ok bool
+		identity, ok = h.requireLegacyTeamIdentity(w, r)
+		if !ok {
+			return
+		}
+		scoped = true
+	}
 	store := h.getTeamStore()
 	if store == nil {
 		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid, "team store not configured"))
@@ -639,6 +737,30 @@ func (h *Handler) CreateTeam(w http.ResponseWriter, r *http.Request) {
 		Strategy:      strings.TrimSpace(req.Strategy),
 		MaxTeammates:  req.MaxTeammates,
 		MaxWriters:    req.MaxWriters,
+	}
+	if scoped {
+		if teamRecord.WorkspaceID != "" &&
+			!strings.EqualFold(teamRecord.WorkspaceID, identity.WorkspaceID) {
+			rejectLegacyTeamWorkspaceMismatch(w, r)
+			return
+		}
+		teamRecord.WorkspaceID = identity.WorkspaceID
+	}
+	if scoped && strings.TrimSpace(req.ParentTeamID) != "" {
+		parentTeamID := strings.TrimSpace(req.ParentTeamID)
+		parent, parentErr := store.GetTeam(r.Context(), parentTeamID)
+		if parentErr != nil {
+			h.writeError(w, http.StatusInternalServerError, parentErr)
+			return
+		}
+		if parent == nil ||
+			!strings.EqualFold(strings.TrimSpace(parent.WorkspaceID), identity.WorkspaceID) {
+			// Do not allow a caller to create a cross-workspace parent edge
+			// or use it to probe another workspace's Team IDs.
+			h.writeError(w, http.StatusNotFound,
+				errors.New(errors.ErrValidationFailed, "parent team not found"))
+			return
+		}
 	}
 	id, err := store.CreateTeam(r.Context(), teamRecord)
 	if err != nil {
@@ -731,9 +853,16 @@ func (h *Handler) GetTeam(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusNotFound, errors.New(errors.ErrValidationFailed, "team not found"))
 		return
 	}
-	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+	traceID, requestID := runtimeTraceIDForRequest(r)
+	w.Header().Set("X-Trace-ID", traceID)
+	envelope := teamCompatibilityEnvelope(r.Context(), store, item, teamID, requestID, traceID)
+	response := map[string]interface{}{
 		"team": item,
-	})
+	}
+	for key, value := range envelope {
+		response[key] = value
+	}
+	h.writeJSON(w, http.StatusOK, response)
 }
 
 // UpdateTeam updates a team.
@@ -765,22 +894,31 @@ func (h *Handler) UpdateTeam(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "failed to parse request body"))
 		return
 	}
+	// Legacy Team records do not provide the versioned lifecycle action
+	// contract needed to safely accept arbitrary status changes here. Keep
+	// status transitions out of PATCH until a controlled operation endpoint can
+	// enforce preflight, idempotency, and conflict semantics.
+	if req.Status != nil {
+		h.writeError(w, http.StatusConflict, errors.New(
+			errors.ErrValidationFailed,
+			"team status updates are unsupported through PATCH; controlled lifecycle actions are not available",
+		))
+		return
+	}
 	if req.WorkspaceID != nil {
-		current.WorkspaceID = strings.TrimSpace(*req.WorkspaceID)
+		requestedWorkspaceID := strings.TrimSpace(*req.WorkspaceID)
+		if identity, scoped := legacyTeamIdentityFromRequest(r); scoped &&
+			!strings.EqualFold(requestedWorkspaceID, identity.WorkspaceID) {
+			rejectLegacyTeamWorkspaceMismatch(w, r)
+			return
+		}
+		current.WorkspaceID = requestedWorkspaceID
 	}
 	if req.LeadSessionID != nil {
 		current.LeadSessionID = strings.TrimSpace(*req.LeadSessionID)
 	}
 	if req.Strategy != nil {
 		current.Strategy = strings.TrimSpace(*req.Strategy)
-	}
-	if req.Status != nil {
-		status, err := parseTeamStatus(*req.Status)
-		if err != nil {
-			h.writeError(w, http.StatusBadRequest, err)
-			return
-		}
-		current.Status = status
 	}
 	if req.MaxTeammates != nil {
 		current.MaxTeammates = *req.MaxTeammates
@@ -1018,6 +1156,23 @@ func (h *Handler) GetTeamFinalSummary(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("X-Trace-ID", traceID)
 		}
 	}
+	summaryState := "unknown"
+	teamRecord, teamErr := store.GetTeam(r.Context(), teamID)
+	if teamErr != nil {
+		h.writeError(w, http.StatusInternalServerError, teamErr)
+		return
+	}
+	if teamRecord != nil {
+		if !team.IsTerminalTeamStatus(teamRecord.Status) {
+			summaryState = "not_applicable"
+		} else if summaryResult != nil && summaryResult.HasSessionError() {
+			summaryState = "failed"
+		} else if summary != "" {
+			summaryState = "ready"
+		} else {
+			summaryState = "pending"
+		}
+	}
 	{
 		traceID, requestID := runtimeTraceIDForRequest(r)
 		if summaryResult != nil && strings.TrimSpace(summaryResult.TraceID) != "" {
@@ -1039,8 +1194,9 @@ func (h *Handler) GetTeamFinalSummary(w http.ResponseWriter, r *http.Request) {
 		h.publishRuntimeEvent("team.summary.generated", traceID, payload)
 	}
 	response := map[string]interface{}{
-		"team_id": teamID,
-		"summary": summary,
+		"team_id":       teamID,
+		"summary":       summary,
+		"summary_state": summaryState,
 	}
 	if summaryResult != nil {
 		team.AppendFinalSummaryMetadata(response, summaryResult)
@@ -1053,6 +1209,15 @@ func (h *Handler) GetTeamFinalSummary(w http.ResponseWriter, r *http.Request) {
 
 // ListTeamSummaries returns summary aggregates for multiple teams.
 func (h *Handler) ListTeamSummaries(w http.ResponseWriter, r *http.Request) {
+	identity, scoped := legacyTeamIdentityFromRequest(r)
+	if !scoped && !legacyTeamLocalModeFromRequest(r) {
+		var ok bool
+		identity, ok = h.requireLegacyTeamIdentity(w, r)
+		if !ok {
+			return
+		}
+		scoped = true
+	}
 	store := h.getTeamStore()
 	if store == nil {
 		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid, "team store not configured"))
@@ -1091,10 +1256,33 @@ func (h *Handler) ListTeamSummaries(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	requestedIDs := parseIDList(r.URL.Query().Get("team_ids"))
-	ids, err := store.ListTeamIDs(r.Context())
-	if err != nil {
-		h.writeError(w, http.StatusInternalServerError, err)
-		return
+	var ids []string
+	if scoped {
+		if requestedWorkspaceID := strings.TrimSpace(r.URL.Query().Get("workspace_id")); requestedWorkspaceID != "" &&
+			!strings.EqualFold(requestedWorkspaceID, identity.WorkspaceID) {
+			rejectLegacyTeamWorkspaceMismatch(w, r)
+			return
+		}
+		records, listErr := store.ListTeams(r.Context(), team.TeamFilter{
+			WorkspaceID: identity.WorkspaceID,
+		})
+		if listErr != nil {
+			h.writeError(w, http.StatusInternalServerError, listErr)
+			return
+		}
+		ids = make([]string, 0, len(records))
+		for _, record := range records {
+			if id := strings.TrimSpace(record.ID); id != "" {
+				ids = append(ids, id)
+			}
+		}
+	} else {
+		var listErr error
+		ids, listErr = store.ListTeamIDs(r.Context())
+		if listErr != nil {
+			h.writeError(w, http.StatusInternalServerError, listErr)
+			return
+		}
 	}
 	if len(requestedIDs) > 0 {
 		available := make(map[string]bool, len(ids))
@@ -1874,6 +2062,9 @@ func (h *Handler) UpdateAgentControlTask(w http.ResponseWriter, r *http.Request)
 	registry := team.NewAgentControlTaskRegistry(store)
 	record, err := registry.UpdateAgentControlTask(r.Context(), updateReq)
 	if err != nil {
+		if h.writeTaskLifecycleConflict(w, err) {
+			return
+		}
 		h.writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -1897,9 +2088,10 @@ func (h *Handler) UpdateAgentControlTaskStatus(w http.ResponseWriter, r *http.Re
 	}
 	taskID := mux.Vars(r)["task_id"]
 	var req struct {
-		Workflow string `json:"workflow,omitempty"`
-		Status   string `json:"status,omitempty"`
-		Summary  string `json:"summary,omitempty"`
+		Workflow     string `json:"workflow,omitempty"`
+		Status       string `json:"status,omitempty"`
+		Summary      string `json:"summary,omitempty"`
+		FencingToken string `json:"fencing_token,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "failed to parse request body"))
@@ -1910,22 +2102,29 @@ func (h *Handler) UpdateAgentControlTaskStatus(w http.ResponseWriter, r *http.Re
 		h.writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	var current *team.Task
-	if status == team.TaskStatusCancelled {
-		current, err = store.GetTask(r.Context(), taskID)
-		if err != nil {
-			h.writeError(w, http.StatusInternalServerError, err)
-			return
-		}
+	current, err := store.GetTask(r.Context(), taskID)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if status != team.TaskStatusCancelled && current != nil {
+		req.FencingToken = taskOutcomeFencingToken(r.Context(), req.FencingToken, current.TeamID, taskID)
 	}
 	registry := team.NewAgentControlTaskRegistry(store)
 	record, err := registry.UpdateAgentControlTaskStatus(r.Context(), agentcontrol.TaskStatusUpdateRequest{
-		ID:       taskID,
-		Workflow: firstNonEmptyString(strings.TrimSpace(req.Workflow), agentcontrol.WorkflowSpawnTeam),
-		Status:   string(status),
-		Summary:  req.Summary,
+		ID:           taskID,
+		Workflow:     firstNonEmptyString(strings.TrimSpace(req.Workflow), agentcontrol.WorkflowSpawnTeam),
+		Status:       string(status),
+		Summary:      req.Summary,
+		FencingToken: req.FencingToken,
 	})
 	if err != nil {
+		if h.writeTaskFencingConflict(w, err) {
+			return
+		}
+		if h.writeTaskLifecycleConflict(w, err) {
+			return
+		}
 		h.writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -1960,6 +2159,55 @@ func (h *Handler) ClaimAgentControlTask(w http.ResponseWriter, r *http.Request) 
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "failed to parse request body"))
 		return
 	}
+	task, err := store.GetTask(r.Context(), taskID)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if task == nil {
+		h.writeError(w, http.StatusNotFound, errors.New(errors.ErrValidationFailed, "task not found"))
+		return
+	}
+	taskTeamID := strings.TrimSpace(task.TeamID)
+	if requestedTeamID := strings.TrimSpace(req.TeamID); requestedTeamID != "" && requestedTeamID != taskTeamID {
+		h.writeError(w, http.StatusConflict, errors.New(
+			errors.ErrValidationFailed,
+			"task does not belong to the requested team",
+		))
+		return
+	}
+	teamRecord, err := store.GetTeam(r.Context(), taskTeamID)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if teamRecord == nil {
+		h.writeError(w, http.StatusNotFound, errors.New(errors.ErrValidationFailed, "team not found"))
+		return
+	}
+	if teamRecord.Status != team.TeamStatusActive {
+		h.writeError(w, http.StatusConflict, errors.New(
+			errors.ErrValidationFailed,
+			"team is not active and cannot claim tasks",
+		))
+		return
+	}
+	mate, err := store.GetTeammate(r.Context(), strings.TrimSpace(req.Assignee))
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if mate == nil ||
+		strings.TrimSpace(mate.TeamID) != taskTeamID ||
+		mate.State != team.TeammateStateIdle ||
+		strings.TrimSpace(mate.SessionID) == "" {
+		h.writeError(w, http.StatusConflict, errors.New(
+			errors.ErrValidationFailed,
+			"assignee is not an idle teammate with a bound runtime session",
+		))
+		return
+	}
+	req.TeamID = taskTeamID
 	leaseUntil, err := resolveLeaseUntil(req.LeaseUntil, req.DurationSec, h.defaultLeaseDuration())
 	if err != nil {
 		h.writeError(w, http.StatusBadRequest, err)
@@ -1984,6 +2232,9 @@ func (h *Handler) ClaimAgentControlTask(w http.ResponseWriter, r *http.Request) 
 		WorkspaceRoot:   req.WorkspaceRoot,
 	})
 	if err != nil {
+		if h.writeTaskFencingConflict(w, err) {
+			return
+		}
 		h.writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -2003,9 +2254,10 @@ func (h *Handler) RenewAgentControlTaskLease(w http.ResponseWriter, r *http.Requ
 	}
 	taskID := mux.Vars(r)["task_id"]
 	var req struct {
-		Workflow    string `json:"workflow,omitempty"`
-		LeaseUntil  string `json:"lease_until,omitempty"`
-		DurationSec int    `json:"duration_sec,omitempty"`
+		Workflow     string `json:"workflow,omitempty"`
+		LeaseUntil   string `json:"lease_until,omitempty"`
+		DurationSec  int    `json:"duration_sec,omitempty"`
+		FencingToken string `json:"fencing_token,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "failed to parse request body"))
@@ -2016,13 +2268,23 @@ func (h *Handler) RenewAgentControlTaskLease(w http.ResponseWriter, r *http.Requ
 		h.writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	if current, loadErr := store.GetTask(r.Context(), taskID); loadErr != nil {
+		h.writeError(w, http.StatusInternalServerError, loadErr)
+		return
+	} else if current != nil {
+		req.FencingToken = taskOutcomeFencingToken(r.Context(), req.FencingToken, current.TeamID, taskID)
+	}
 	registry := team.NewAgentControlTaskRegistry(store).WithClaims(h.getTeamClaimsManager())
 	record, err := registry.RenewAgentControlTaskLease(r.Context(), agentcontrol.TaskLeaseRenewRequest{
-		ID:         taskID,
-		Workflow:   firstNonEmptyString(strings.TrimSpace(req.Workflow), agentcontrol.WorkflowSpawnTeam),
-		LeaseUntil: leaseUntil,
+		ID:           taskID,
+		Workflow:     firstNonEmptyString(strings.TrimSpace(req.Workflow), agentcontrol.WorkflowSpawnTeam),
+		LeaseUntil:   leaseUntil,
+		FencingToken: req.FencingToken,
 	})
 	if err != nil {
+		if h.writeTaskFencingConflict(w, err) {
+			return
+		}
 		h.writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -2039,10 +2301,11 @@ func (h *Handler) ReleaseAgentControlTask(w http.ResponseWriter, r *http.Request
 	}
 	taskID := mux.Vars(r)["task_id"]
 	var req struct {
-		Workflow   string `json:"workflow,omitempty"`
-		Status     string `json:"status,omitempty"`
-		Summary    string `json:"summary,omitempty"`
-		TeammateID string `json:"teammate_id,omitempty"`
+		Workflow     string `json:"workflow,omitempty"`
+		Status       string `json:"status,omitempty"`
+		Summary      string `json:"summary,omitempty"`
+		TeammateID   string `json:"teammate_id,omitempty"`
+		FencingToken string `json:"fencing_token,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "failed to parse request body"))
@@ -2061,21 +2324,28 @@ func (h *Handler) ReleaseAgentControlTask(w http.ResponseWriter, r *http.Request
 		h.writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	assignee := teamTaskAssigneeID(current)
-	registry := team.NewAgentControlTaskRegistry(store).WithClaims(h.getTeamClaimsManager())
-	record, err := registry.ReleaseAgentControlTask(r.Context(), agentcontrol.TaskReleaseRequest{
-		ID:       taskID,
-		Workflow: firstNonEmptyString(strings.TrimSpace(req.Workflow), agentcontrol.WorkflowSpawnTeam),
-		Status:   string(status),
-		Summary:  req.Summary,
-	})
-	if err != nil {
-		h.writeError(w, http.StatusInternalServerError, err)
+	if current == nil {
+		h.writeError(w, http.StatusNotFound, errors.New(errors.ErrValidationFailed, "task not found"))
 		return
 	}
-	if teammateID := strings.TrimSpace(req.TeammateID); teammateID != "" {
-		_ = store.UpdateTeammateState(r.Context(), teammateID, team.TeammateStateIdle)
-		assignee = firstNonEmptyString(assignee, teammateID)
+	assignee := teamTaskAssigneeID(current)
+	if status != team.TaskStatusCancelled {
+		req.FencingToken = taskOutcomeFencingToken(r.Context(), req.FencingToken, current.TeamID, taskID)
+	}
+	registry := team.NewAgentControlTaskRegistry(store).WithClaims(h.getTeamClaimsManager())
+	record, err := registry.ReleaseAgentControlTask(r.Context(), agentcontrol.TaskReleaseRequest{
+		ID:           taskID,
+		Workflow:     firstNonEmptyString(strings.TrimSpace(req.Workflow), agentcontrol.WorkflowSpawnTeam),
+		Status:       string(status),
+		Summary:      req.Summary,
+		FencingToken: req.FencingToken,
+	})
+	if err != nil {
+		if h.writeTaskFencingConflict(w, err) {
+			return
+		}
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
 	}
 	if status == team.TaskStatusCancelled {
 		h.dispatchCancelledTaskLifecycleEvent(r.Context(), store, current, assignee, "api_release", strings.TrimSpace(req.Summary))
@@ -2106,6 +2376,12 @@ func (h *Handler) UpdateAgentControlTaskTerminal(w http.ResponseWriter, r *http.
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "failed to parse request body"))
 		return
 	}
+	if current, loadErr := store.GetTask(r.Context(), taskID); loadErr != nil {
+		h.writeError(w, http.StatusInternalServerError, loadErr)
+		return
+	} else if current != nil {
+		req.FencingToken = taskOutcomeFencingToken(r.Context(), req.FencingToken, current.TeamID, taskID)
+	}
 	status, err := parseTaskStatus(req.Status)
 	if err != nil {
 		h.writeError(w, http.StatusBadRequest, err)
@@ -2124,7 +2400,7 @@ func (h *Handler) UpdateAgentControlTaskTerminal(w http.ResponseWriter, r *http.
 		FencingToken:    req.FencingToken,
 	})
 	if err != nil {
-		if err == agentcontrol.ErrTaskFencingMismatch {
+		if stderrors.Is(err, agentcontrol.ErrTaskFencingMismatch) {
 			// Late result from a stale attempt: audit the rejection and refuse
 			// to mutate the task without failing the whole request path.
 			teamID := strings.TrimSpace(req.TeamID)
@@ -2144,6 +2420,9 @@ func (h *Handler) UpdateAgentControlTaskTerminal(w http.ResponseWriter, r *http.
 				})
 			}
 			h.writeError(w, http.StatusConflict, errors.New(errors.ErrValidationFailed, "task fencing token mismatch: stale attempt result rejected"))
+			return
+		}
+		if h.writeTaskFencingConflict(w, err) {
 			return
 		}
 		h.writeError(w, http.StatusInternalServerError, err)
@@ -2166,10 +2445,17 @@ func (h *Handler) BlockAgentControlTask(w http.ResponseWriter, r *http.Request) 
 		Summary         string `json:"summary,omitempty"`
 		TeammateID      string `json:"teammate_id,omitempty"`
 		SkipStateUpdate bool   `json:"skip_state_update,omitempty"`
+		FencingToken    string `json:"fencing_token,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "failed to parse request body"))
 		return
+	}
+	if current, loadErr := store.GetTask(r.Context(), taskID); loadErr != nil {
+		h.writeError(w, http.StatusInternalServerError, loadErr)
+		return
+	} else if current != nil {
+		req.FencingToken = taskOutcomeFencingToken(r.Context(), req.FencingToken, current.TeamID, taskID)
 	}
 	registry := team.NewAgentControlTaskRegistry(store).WithClaims(h.getTeamClaimsManager())
 	record, err := registry.BlockAgentControlTask(r.Context(), agentcontrol.TaskBlockRequest{
@@ -2178,8 +2464,12 @@ func (h *Handler) BlockAgentControlTask(w http.ResponseWriter, r *http.Request) 
 		Summary:         req.Summary,
 		TeammateID:      req.TeammateID,
 		SkipStateUpdate: req.SkipStateUpdate,
+		FencingToken:    req.FencingToken,
 	})
 	if err != nil {
+		if h.writeTaskFencingConflict(w, err) {
+			return
+		}
 		h.writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -2864,6 +3154,9 @@ func (h *Handler) UpdateTask(w http.ResponseWriter, r *http.Request) {
 	}
 	taskRegistry := team.NewAgentControlTaskRegistry(store)
 	if _, err := taskRegistry.UpdateAgentControlTask(r.Context(), updateReq); err != nil {
+		if h.writeTaskLifecycleConflict(w, err) {
+			return
+		}
 		h.writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -3031,12 +3324,28 @@ func (h *Handler) ClaimReadyTasks(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid, "team store not configured"))
 		return
 	}
+	teamID := strings.TrimSpace(mux.Vars(r)["id"])
+	teamRecord, err := store.GetTeam(r.Context(), teamID)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if teamRecord == nil {
+		h.writeError(w, http.StatusNotFound, errors.New(errors.ErrValidationFailed, "team not found"))
+		return
+	}
+	if teamRecord.Status != team.TeamStatusActive {
+		h.writeError(w, http.StatusConflict, errors.New(
+			errors.ErrValidationFailed,
+			"team is not active and cannot claim tasks",
+		))
+		return
+	}
 	orchestrator := h.getTeamOrchestrator()
 	if orchestrator == nil {
 		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid, "team orchestrator not configured"))
 		return
 	}
-	teamID := mux.Vars(r)["id"]
 	var req struct {
 		Limit int `json:"limit,omitempty"`
 	}
@@ -3200,23 +3509,25 @@ type taskOutcomeHandlerOptions struct {
 }
 
 type taskOutcomeRequest struct {
-	Outcome    team.TaskOutcomeContract
-	TeammateID string
-	ResultRef  *string
-	NotifyLead *bool
-	AutoReplan *bool
-	Structured bool
+	Outcome      team.TaskOutcomeContract
+	TeammateID   string
+	ResultRef    *string
+	FencingToken string
+	NotifyLead   *bool
+	AutoReplan   *bool
+	Structured   bool
 }
 
 type rawTaskOutcomeRequest struct {
-	TaskStatus string  `json:"task_status,omitempty"`
-	Summary    string  `json:"summary,omitempty"`
-	Blocker    string  `json:"blocker,omitempty"`
-	HandoffTo  string  `json:"handoff_to,omitempty"`
-	TeammateID string  `json:"teammate_id,omitempty"`
-	ResultRef  *string `json:"result_ref,omitempty"`
-	NotifyLead *bool   `json:"notify_lead,omitempty"`
-	AutoReplan *bool   `json:"auto_replan,omitempty"`
+	TaskStatus   string  `json:"task_status,omitempty"`
+	Summary      string  `json:"summary,omitempty"`
+	Blocker      string  `json:"blocker,omitempty"`
+	HandoffTo    string  `json:"handoff_to,omitempty"`
+	TeammateID   string  `json:"teammate_id,omitempty"`
+	ResultRef    *string `json:"result_ref,omitempty"`
+	FencingToken string  `json:"fencing_token,omitempty"`
+	NotifyLead   *bool   `json:"notify_lead,omitempty"`
+	AutoReplan   *bool   `json:"auto_replan,omitempty"`
 }
 
 func decodeTaskOutcomeRequest(body io.Reader, defaultStatus team.TaskOutcomeStatus) (taskOutcomeRequest, error) {
@@ -3230,10 +3541,11 @@ func decodeTaskOutcomeRequest(body io.Reader, defaultStatus team.TaskOutcomeStat
 			Status:  defaultStatus,
 			Summary: strings.TrimSpace(req.Summary),
 		},
-		TeammateID: strings.TrimSpace(req.TeammateID),
-		ResultRef:  normalizeOptionalString(req.ResultRef),
-		NotifyLead: req.NotifyLead,
-		AutoReplan: req.AutoReplan,
+		TeammateID:   strings.TrimSpace(req.TeammateID),
+		ResultRef:    normalizeOptionalString(req.ResultRef),
+		FencingToken: strings.TrimSpace(req.FencingToken),
+		NotifyLead:   req.NotifyLead,
+		AutoReplan:   req.AutoReplan,
 	}
 	outcome, structured, err := team.NormalizeTaskOutcomeContract(defaultStatus, team.TaskOutcomeContract{
 		Status:    team.TaskOutcomeStatus(req.TaskStatus),
@@ -3255,6 +3567,70 @@ func normalizeOptionalString(value *string) *string {
 	}
 	trimmed := strings.TrimSpace(*value)
 	return &trimmed
+}
+
+func (h *Handler) writeTaskFencingConflict(w http.ResponseWriter, err error) bool {
+	switch {
+	case stderrors.Is(err, agentcontrol.ErrTaskVersionConflict):
+		h.writeError(w, http.StatusConflict, errors.New(
+			errors.ErrValidationFailed,
+			"task version conflict: refresh the task before retrying",
+		))
+		return true
+	case stderrors.Is(err, agentcontrol.ErrTaskVersionUnsupported):
+		h.writeError(w, http.StatusConflict, errors.New(
+			errors.ErrValidationFailed,
+			"task retry requires atomic version fencing, which is not supported by the configured store",
+		))
+		return true
+	case stderrors.Is(err, agentcontrol.ErrTaskFencingMismatch):
+		h.writeError(w, http.StatusConflict, errors.New(
+			errors.ErrValidationFailed,
+			"task fencing token mismatch: stale attempt rejected",
+		))
+		return true
+	case stderrors.Is(err, agentcontrol.ErrTaskFencingUnsupported):
+		h.writeError(w, http.StatusConflict, errors.New(
+			errors.ErrValidationFailed,
+			"task fencing operation is not supported by the configured store",
+		))
+		return true
+	case stderrors.Is(err, agentcontrol.ErrOrchestratorOwnerMismatch):
+		h.writeError(w, http.StatusConflict, errors.New(
+			errors.ErrValidationFailed,
+			"orchestrator owner token mismatch: stale owner rejected",
+		))
+		return true
+	default:
+		return false
+	}
+}
+
+func (h *Handler) writeTaskLifecycleConflict(w http.ResponseWriter, err error) bool {
+	if !stderrors.Is(err, agentcontrol.ErrTaskLifecycleActionRequired) {
+		return false
+	}
+	h.writeError(w, http.StatusConflict, errors.New(
+		errors.ErrValidationFailed,
+		err.Error(),
+	))
+	return true
+}
+
+func taskOutcomeFencingToken(ctx context.Context, supplied, teamID, taskID string) string {
+	if supplied = strings.TrimSpace(supplied); supplied != "" {
+		return supplied
+	}
+	runMeta, ok := team.GetRunMeta(ctx)
+	if !ok || runMeta == nil || runMeta.Team == nil {
+		return ""
+	}
+	bound := runMeta.Team
+	if !strings.EqualFold(strings.TrimSpace(bound.TeamID), strings.TrimSpace(teamID)) ||
+		strings.TrimSpace(bound.CurrentTaskID) != strings.TrimSpace(taskID) {
+		return ""
+	}
+	return strings.TrimSpace(bound.FencingToken)
 }
 
 // ReplanTask asks the lead session to replan after a failed task.
@@ -3291,10 +3667,22 @@ func (h *Handler) ReplanTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		AutoPersist bool `json:"auto_persist,omitempty"`
+		AutoPersist     bool  `json:"auto_persist,omitempty"`
+		ExpectedVersion int64 `json:"expected_version,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "failed to parse request body"))
+		return
+	}
+	if req.ExpectedVersion <= 0 {
+		h.writeError(w, http.StatusBadRequest, errors.New(
+			errors.ErrValidationFailed,
+			"expected_version is required for task replan",
+		))
+		return
+	}
+	if currentVersion := failedTask.Version; currentVersion != req.ExpectedVersion {
+		h.writeTaskFencingConflict(w, agentcontrol.ErrTaskVersionConflict)
 		return
 	}
 	autoPersist := req.AutoPersist
@@ -3307,13 +3695,22 @@ func (h *Handler) ReplanTask(w http.ResponseWriter, r *http.Request) {
 		Store:       store,
 		AutoPersist: autoPersist,
 	}
-	planResult, err := planner.ReplanOnFailure(r.Context(), *teamRecord, *failedTask)
+	planResult, err := planner.ReplanOnFailureWithVersion(
+		r.Context(),
+		*teamRecord,
+		*failedTask,
+		req.ExpectedVersion,
+	)
 	if err != nil {
+		if h.writeTaskFencingConflict(w, err) {
+			return
+		}
 		traceID, requestID := runtimeTraceIDForRequest(r)
 		payload := map[string]interface{}{
-			"team_id":      teamID,
-			"task_id":      taskID,
-			"auto_persist": autoPersist,
+			"team_id":          teamID,
+			"task_id":          taskID,
+			"auto_persist":     autoPersist,
+			"expected_version": req.ExpectedVersion,
 		}
 		if requestID != "" {
 			payload["request_id"] = requestID
@@ -3349,6 +3746,7 @@ func (h *Handler) ReplanTask(w http.ResponseWriter, r *http.Request) {
 			"task_count":       len(tasks),
 			"dependency_count": len(deps),
 			"auto_persist":     autoPersist,
+			"expected_version": req.ExpectedVersion,
 			"input_count":      inputCount,
 			"input_task_count": inputTaskCount,
 		}
@@ -3365,6 +3763,7 @@ func (h *Handler) ReplanTask(w http.ResponseWriter, r *http.Request) {
 		"team_id":          teamID,
 		"failed_task":      taskID,
 		"auto_persist":     autoPersist,
+		"expected_version": req.ExpectedVersion,
 		"tasks":            tasks,
 		"dependencies":     deps,
 		"task_count":       len(tasks),
@@ -3415,6 +3814,7 @@ func (h *Handler) handleTaskOutcome(w http.ResponseWriter, r *http.Request, opti
 			return
 		}
 	}
+	req.FencingToken = taskOutcomeFencingToken(r.Context(), req.FencingToken, teamID, taskID)
 	route := (*team.TaskExecutionRoute)(nil)
 	if runMeta, ok := team.GetRunMeta(r.Context()); ok {
 		route = team.TaskExecutionRouteFromRunMeta(runMeta)
@@ -3433,12 +3833,16 @@ func (h *Handler) handleTaskOutcome(w http.ResponseWriter, r *http.Request, opti
 		}, team.TerminalTaskOutcomeRequest{
 			Task:          *current,
 			TeammateID:    req.TeammateID,
+			FencingToken:  req.FencingToken,
 			Outcome:       applyOutcome,
 			ResultRef:     req.ResultRef,
 			Route:         route.Clone(),
 			DefaultStatus: req.Outcome.Status,
 		})
 		if err != nil {
+			if h.writeTaskFencingConflict(w, err) {
+				return
+			}
 			h.writeError(w, http.StatusInternalServerError, err)
 			return
 		}
@@ -3529,12 +3933,16 @@ func (h *Handler) handleTaskOutcome(w http.ResponseWriter, r *http.Request, opti
 			Team:            *teamRecord,
 			Task:            *current,
 			TeammateID:      req.TeammateID,
+			FencingToken:    req.FencingToken,
 			Outcome:         applyOutcome,
 			Route:           route.Clone(),
 			NotifyRecipient: req.NotifyLead,
 			AutoReplan:      req.AutoReplan,
 		})
 		if err != nil {
+			if h.writeTaskFencingConflict(w, err) {
+				return
+			}
 			h.writeError(w, http.StatusInternalServerError, err)
 			return
 		}
@@ -3653,8 +4061,9 @@ func (h *Handler) RenewTaskLease(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		LeaseUntil  string `json:"lease_until,omitempty"`
-		DurationSec int    `json:"duration_sec,omitempty"`
+		LeaseUntil   string `json:"lease_until,omitempty"`
+		DurationSec  int    `json:"duration_sec,omitempty"`
+		FencingToken string `json:"fencing_token,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "failed to parse request body"))
@@ -3666,13 +4075,18 @@ func (h *Handler) RenewTaskLease(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	req.FencingToken = taskOutcomeFencingToken(r.Context(), req.FencingToken, teamID, taskID)
 
 	taskRegistry := team.NewAgentControlTaskRegistry(store).WithClaims(h.getTeamClaimsManager())
 	if _, err := taskRegistry.RenewAgentControlTaskLease(r.Context(), agentcontrol.TaskLeaseRenewRequest{
-		ID:         taskID,
-		Workflow:   agentcontrol.WorkflowSpawnTeam,
-		LeaseUntil: leaseUntil,
+		ID:           taskID,
+		Workflow:     agentcontrol.WorkflowSpawnTeam,
+		LeaseUntil:   leaseUntil,
+		FencingToken: req.FencingToken,
 	}); err != nil {
+		if h.writeTaskFencingConflict(w, err) {
+			return
+		}
 		h.writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -3719,9 +4133,10 @@ func (h *Handler) ReleaseTaskLease(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Status     string `json:"status,omitempty"`
-		Summary    string `json:"summary,omitempty"`
-		TeammateID string `json:"teammate_id,omitempty"`
+		Status       string `json:"status,omitempty"`
+		Summary      string `json:"summary,omitempty"`
+		TeammateID   string `json:"teammate_id,omitempty"`
+		FencingToken string `json:"fencing_token,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "failed to parse request body"))
@@ -3735,22 +4150,26 @@ func (h *Handler) ReleaseTaskLease(w http.ResponseWriter, r *http.Request) {
 	if status == "" {
 		status = team.TaskStatusPending
 	}
+	if status != team.TaskStatusCancelled {
+		req.FencingToken = taskOutcomeFencingToken(r.Context(), req.FencingToken, teamID, taskID)
+	}
 	taskRegistry := team.NewAgentControlTaskRegistry(store).WithClaims(h.getTeamClaimsManager())
 	released, err := taskRegistry.ReleaseAgentControlTask(r.Context(), agentcontrol.TaskReleaseRequest{
-		ID:       taskID,
-		Workflow: agentcontrol.WorkflowSpawnTeam,
-		Status:   string(status),
-		Summary:  strings.TrimSpace(req.Summary),
+		ID:           taskID,
+		Workflow:     agentcontrol.WorkflowSpawnTeam,
+		Status:       string(status),
+		Summary:      strings.TrimSpace(req.Summary),
+		FencingToken: req.FencingToken,
 	})
 	if err != nil {
+		if h.writeTaskFencingConflict(w, err) {
+			return
+		}
 		h.writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	if strings.TrimSpace(req.TeammateID) != "" {
-		_ = store.UpdateTeammateState(r.Context(), strings.TrimSpace(req.TeammateID), team.TeammateStateIdle)
-	}
 	if status == team.TaskStatusCancelled {
-		h.dispatchCancelledTaskLifecycleEvent(r.Context(), store, current, firstNonEmptyString(teamTaskAssigneeID(current), strings.TrimSpace(req.TeammateID)), "api_release", strings.TrimSpace(req.Summary))
+		h.dispatchCancelledTaskLifecycleEvent(r.Context(), store, current, teamTaskAssigneeID(current), "api_release", strings.TrimSpace(req.Summary))
 	}
 	updated, _ := store.GetTask(r.Context(), taskID)
 	if updated == nil {
@@ -3767,7 +4186,7 @@ func (h *Handler) ReleaseTaskLease(w http.ResponseWriter, r *http.Request) {
 			"task_id":     taskID,
 			"status":      status,
 			"summary":     strings.TrimSpace(req.Summary),
-			"teammate_id": strings.TrimSpace(req.TeammateID),
+			"teammate_id": teamTaskAssigneeID(current),
 		}
 		if requestID != "" {
 			payload["request_id"] = requestID
@@ -3799,12 +4218,25 @@ func (h *Handler) RetryTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Status     string `json:"status,omitempty"`
-		Summary    string `json:"summary,omitempty"`
-		TeammateID string `json:"teammate_id,omitempty"`
+		Status          string `json:"status,omitempty"`
+		Summary         string `json:"summary,omitempty"`
+		TeammateID      string `json:"teammate_id,omitempty"`
+		FencingToken    string `json:"fencing_token,omitempty"`
+		ExpectedVersion int64  `json:"expected_version,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "failed to parse request body"))
+		return
+	}
+	if req.ExpectedVersion <= 0 {
+		h.writeError(w, http.StatusBadRequest, errors.New(
+			errors.ErrValidationFailed,
+			"expected_version is required for task retry",
+		))
+		return
+	}
+	if current.Version != req.ExpectedVersion {
+		h.writeTaskFencingConflict(w, agentcontrol.ErrTaskVersionConflict)
 		return
 	}
 	status, err := parseTaskStatus(req.Status)
@@ -3815,18 +4247,21 @@ func (h *Handler) RetryTask(w http.ResponseWriter, r *http.Request) {
 	if status == "" {
 		status = team.TaskStatusPending
 	}
+	req.FencingToken = taskOutcomeFencingToken(r.Context(), req.FencingToken, teamID, taskID)
 	taskRegistry := team.NewAgentControlTaskRegistry(store).WithClaims(h.getTeamClaimsManager())
 	if _, err := taskRegistry.RetryAgentControlTask(r.Context(), agentcontrol.TaskRetryRequest{
-		ID:       taskID,
-		Workflow: agentcontrol.WorkflowSpawnTeam,
-		Status:   string(status),
-		Summary:  strings.TrimSpace(req.Summary),
+		ID:              taskID,
+		Workflow:        agentcontrol.WorkflowSpawnTeam,
+		Status:          string(status),
+		Summary:         strings.TrimSpace(req.Summary),
+		ExpectedVersion: req.ExpectedVersion,
+		FencingToken:    req.FencingToken,
 	}); err != nil {
+		if h.writeTaskFencingConflict(w, err) {
+			return
+		}
 		h.writeError(w, http.StatusInternalServerError, err)
 		return
-	}
-	if strings.TrimSpace(req.TeammateID) != "" {
-		_ = store.UpdateTeammateState(r.Context(), strings.TrimSpace(req.TeammateID), team.TeammateStateIdle)
 	}
 	updated, _ := store.GetTask(r.Context(), taskID)
 	if updated == nil {
@@ -3840,7 +4275,7 @@ func (h *Handler) RetryTask(w http.ResponseWriter, r *http.Request) {
 			"task_id":     taskID,
 			"status":      status,
 			"summary":     strings.TrimSpace(req.Summary),
-			"teammate_id": strings.TrimSpace(req.TeammateID),
+			"teammate_id": teamTaskAssigneeID(current),
 		}
 		if requestID != "" {
 			payload["request_id"] = requestID
@@ -4094,22 +4529,50 @@ func (h *Handler) AckMailboxMessage(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "message_id is required"))
 		return
 	}
+	receipt := team.MailReceipt{
+		TeamID:    teamID,
+		MessageID: messageID,
+		AgentID:   agentID,
+		AckedAt:   time.Now().UTC(),
+	}
+	recorded := true
 	var err error
-	if agentID != "" {
-		err = store.RecordMailReceipt(r.Context(), team.MailReceipt{
-			TeamID:    teamID,
-			MessageID: messageID,
-			AgentID:   agentID,
-			AckedAt:   time.Now().UTC(),
-		})
+	if recorder, ok := store.(team.MailReceiptOnceRecorder); ok {
+		recorded, err = recorder.RecordMailReceiptOnce(r.Context(), receipt)
 	} else {
-		err = store.AckMail(r.Context(), teamID, messageID, time.Now().UTC())
+		// Compatibility fallback for non-SQLite stores. Production SQLite
+		// stores use the atomic recorder above; this preserves replay behavior
+		// for sequential requests on legacy Store implementations.
+		receipts, readErr := store.ListMailReceipts(r.Context(), teamID, messageID)
+		if readErr != nil {
+			err = readErr
+		} else {
+			expectedAgentID := agentID
+			if expectedAgentID == "" {
+				expectedAgentID = "*"
+			}
+			for _, existing := range receipts {
+				if strings.TrimSpace(existing.AgentID) == expectedAgentID {
+					recorded = false
+					break
+				}
+			}
+			if agentID != "" {
+				err = store.RecordMailReceipt(r.Context(), receipt)
+			} else {
+				err = store.AckMail(r.Context(), teamID, messageID, receipt.AckedAt)
+			}
+		}
 	}
 	if err != nil {
+		if stderrors.Is(err, team.ErrMailNotFound) {
+			h.writeError(w, http.StatusNotFound, errors.New(errors.ErrValidationFailed, "mail not found"))
+			return
+		}
 		h.writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	{
+	if recorded {
 		traceID, requestID := runtimeTraceIDForRequest(r)
 		payload := map[string]interface{}{
 			"team_id":    teamID,
@@ -4127,6 +4590,7 @@ func (h *Handler) AckMailboxMessage(w http.ResponseWriter, r *http.Request) {
 		"message_id": messageID,
 		"team_id":    teamID,
 		"agent_id":   agentID,
+		"replayed":   !recorded,
 	})
 }
 
@@ -4508,10 +4972,15 @@ func (h *Handler) SweepTeammates(w http.ResponseWriter, r *http.Request) {
 		if reclaimTasks {
 			for _, task := range tasksByAssignee[mate.ID] {
 				if _, err := taskRegistry.RetryAgentControlTask(r.Context(), agentcontrol.TaskRetryRequest{
-					ID:       task.ID,
-					Workflow: agentcontrol.WorkflowSpawnTeam,
-					Status:   string(parsedReclaimStatus),
+					ID:              task.ID,
+					Workflow:        agentcontrol.WorkflowSpawnTeam,
+					Status:          string(parsedReclaimStatus),
+					ExpectedVersion: task.Version,
+					FencingToken:    task.FencingToken,
 				}); err != nil {
+					if h.writeTaskFencingConflict(w, err) {
+						return
+					}
 					h.writeError(w, http.StatusInternalServerError, err)
 					return
 				}

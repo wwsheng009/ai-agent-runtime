@@ -17,30 +17,33 @@ export function useDispatchTeamReadiness(teams: RuntimeTeamRecord[]) {
   useEffect(() => {
     if (teams.length === 0) {
       // P0-2 机械搬迁：保留原「teams 清空即同步复位 readiness 与 loading」语义。
-       
+
       setDispatchTeamReadiness({});
       setIsDispatchReadinessLoading(false);
       return;
     }
 
     let cancelled = false;
+    const controller = new AbortController();
+    setDispatchTeamReadiness({});
     setIsDispatchReadinessLoading(true);
 
-    void loadDispatchTeamReadiness(teams)
+    void loadDispatchTeamReadiness(teams, controller.signal)
       .then((nextMap) => {
-        if (cancelled) {
+        if (cancelled || controller.signal.aborted) {
           return;
         }
         setDispatchTeamReadiness(nextMap);
       })
       .finally(() => {
-        if (!cancelled) {
+        if (!cancelled && !controller.signal.aborted) {
           setIsDispatchReadinessLoading(false);
         }
       });
 
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [teams]);
 

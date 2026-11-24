@@ -17,6 +17,8 @@ import type {
   RuntimeTeamMailboxResponse,
   RuntimeTeamPathClaimsQuery,
   RuntimeTeamPathClaimsResponse,
+  RuntimeTeamPreflightResponse,
+  RuntimeTeamResponse,
   RuntimeTeamSummariesQuery,
   RuntimeTeamSummariesResponse,
   RuntimeTeamTasksQuery,
@@ -34,6 +36,19 @@ import {
   buildRuntimeUrlWithQuery,
   fetchRuntimeJson,
 } from "./shared";
+
+export {
+  createRuntimeTeamDefinition,
+  createRuntimeTeamRunDraft,
+  getRuntimeTeamDefinition,
+  getRuntimeTeamRun,
+  getRuntimeTeamRunPreflight,
+  isRuntimeTeamProductCapabilitySupported,
+  listRuntimeTeamDefinitions,
+  listRuntimeTeamRuns,
+  startRuntimeTeamRun,
+  updateRuntimeTeamDefinition,
+} from "./team-product";
 
 export async function createRuntimeTeam(
   request: RuntimeCreateTeamRequest,
@@ -58,12 +73,29 @@ export async function listRuntimeTeams(
     buildRuntimeUrlWithQuery("/api/runtime/teams", {
       limit: query.limit,
       status: query.status,
+      team_ids: query.teamIds?.join(","),
       workspace_id: query.workspaceId,
     }),
     {
       headers: {
         Accept: "application/json",
       },
+      signal: query.signal,
+    },
+  );
+}
+
+export async function getRuntimeTeam(
+  teamId: string,
+  options: { signal?: AbortSignal } = {},
+): Promise<RuntimeTeamResponse> {
+  return fetchRuntimeJson<RuntimeTeamResponse>(
+    buildRuntimeUrl(`/api/runtime/teams/${encodeURIComponent(teamId)}`),
+    {
+      headers: {
+        Accept: "application/json",
+      },
+      signal: options.signal,
     },
   );
 }
@@ -84,12 +116,14 @@ export async function listRuntimeTeamSummaries(
       headers: {
         Accept: "application/json",
       },
+      signal: query.signal,
     },
   );
 }
 
 export async function getRuntimeTeamFinalSummary(
   teamId: string,
+  options: { signal?: AbortSignal } = {},
 ): Promise<RuntimeTeamFinalSummaryResponse> {
   return fetchRuntimeJson<RuntimeTeamFinalSummaryResponse>(
     buildRuntimeUrl(
@@ -99,6 +133,41 @@ export async function getRuntimeTeamFinalSummary(
       headers: {
         Accept: "application/json",
       },
+      signal: options.signal,
+    },
+  );
+}
+
+export async function getRuntimeTeamPreflight(
+  teamId: string,
+  options: { signal?: AbortSignal } = {},
+): Promise<RuntimeTeamPreflightResponse> {
+  return fetchRuntimeJson<RuntimeTeamPreflightResponse>(
+    buildRuntimeUrl(
+      `/api/runtime/teams/${encodeURIComponent(teamId)}/preflight`,
+    ),
+    {
+      headers: {
+        Accept: "application/json",
+      },
+      signal: options.signal,
+    },
+  );
+}
+
+export async function getRuntimeTeamReadiness(
+  teamId: string,
+  options: { signal?: AbortSignal } = {},
+): Promise<RuntimeTeamPreflightResponse> {
+  return fetchRuntimeJson<RuntimeTeamPreflightResponse>(
+    buildRuntimeUrl(
+      `/api/runtime/teams/${encodeURIComponent(teamId)}/readiness`,
+    ),
+    {
+      headers: {
+        Accept: "application/json",
+      },
+      signal: options.signal,
     },
   );
 }
@@ -119,6 +188,7 @@ export async function listRuntimeTeamTeammates(
       headers: {
         Accept: "application/json",
       },
+      signal: query.signal,
     },
   );
 }
@@ -161,6 +231,7 @@ export async function listRuntimeTeamTasks(
       headers: {
         Accept: "application/json",
       },
+      signal: query.signal,
     },
   );
 }
@@ -202,6 +273,7 @@ export async function getRuntimeTeamTaskGraph(
       headers: {
         Accept: "application/json",
       },
+      signal: query.signal,
     },
   );
 }
@@ -214,7 +286,7 @@ export async function listRuntimeTeamEvents(
     buildRuntimeUrlWithQuery(
       `/api/runtime/teams/${encodeURIComponent(teamId)}/events`,
       {
-        after: query.after,
+        after: query.afterSeq ?? query.after,
         event_type: query.eventType,
         limit: query.limit,
         since: query.since,
@@ -225,6 +297,7 @@ export async function listRuntimeTeamEvents(
       headers: {
         Accept: "application/json",
       },
+      signal: query.signal,
     },
   );
 }
@@ -254,6 +327,7 @@ export async function listRuntimeTeamMailbox(
       headers: {
         Accept: "application/json",
       },
+      signal: query.signal,
     },
   );
 }
@@ -278,6 +352,7 @@ export async function listRuntimeTeamPathClaims(
       headers: {
         Accept: "application/json",
       },
+      signal: query.signal,
     },
   );
 }

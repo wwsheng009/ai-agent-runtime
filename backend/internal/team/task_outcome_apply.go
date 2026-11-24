@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
@@ -23,6 +24,7 @@ type BlockedTaskOutcomeRequest struct {
 	Team            Team
 	Task            Task
 	TeammateID      string
+	FencingToken    string
 	Outcome         TaskOutcomeContract
 	Route           *TaskExecutionRoute
 	NotifyRecipient *bool
@@ -57,6 +59,7 @@ func (r *BlockedTaskOutcomeResult) Replanned() bool {
 type TerminalTaskOutcomeRequest struct {
 	Task            Task
 	TeammateID      string
+	FencingToken    string
 	Outcome         TaskOutcomeContract
 	ResultRef       *string
 	Route           *TaskExecutionRoute
@@ -86,6 +89,20 @@ func ApplyTerminalTaskOutcome(ctx context.Context, services TaskOutcomeApplyServ
 	if taskID == "" {
 		return nil, fmt.Errorf("task id is required")
 	}
+	current, err := services.Store.GetTask(ctx, taskID)
+	if err != nil {
+		return nil, err
+	}
+	if current == nil {
+		return nil, fmt.Errorf("task not found: %s", taskID)
+	}
+	if suppliedTeamID := strings.TrimSpace(req.Task.TeamID); suppliedTeamID != "" &&
+		!strings.EqualFold(strings.TrimSpace(current.TeamID), suppliedTeamID) {
+		return nil, fmt.Errorf("task does not belong to team: %s", taskID)
+	}
+	// The supplied Task is a snapshot, and TeammateID is caller input. Use the
+	// persisted owner for attribution as well as for the registry transition.
+	req.Task = *current
 
 	defaultStatus := req.DefaultStatus
 	if defaultStatus == "" {
@@ -107,9 +124,12 @@ func ApplyTerminalTaskOutcome(ctx context.Context, services TaskOutcomeApplyServ
 	}
 	summary := strings.TrimSpace(firstNonEmptyString(normalized.Summary, normalized.Blocker))
 	resultRef := normalizeOptionalTaskResultRef(req.ResultRef)
-	teammateID := strings.TrimSpace(req.TeammateID)
-	if teammateID == "" && req.Task.Assignee != nil {
-		teammateID = strings.TrimSpace(*req.Task.Assignee)
+	teammateID := taskAssigneeID(req.Task)
+	if teammateID == "" {
+		// With no persisted owner there is no teammate state to mutate. Keep
+		// the caller identity only as non-authoritative event attribution for
+		// legacy/unassigned task reports.
+		teammateID = strings.TrimSpace(req.TeammateID)
 	}
 
 	taskWriter := NewAgentControlTaskRegistry(services.Store).WithClaims(services.Claims)
@@ -122,6 +142,10 @@ func ApplyTerminalTaskOutcome(ctx context.Context, services TaskOutcomeApplyServ
 		ResultRef:       resultRef,
 		TeammateID:      teammateID,
 		SkipStateUpdate: req.SkipStateUpdate,
+		// The task snapshot is caller-supplied read data, not proof of
+		// ownership. Only an explicit token (or a trusted run-context token
+		// resolved by the caller) may authorize a claimed attempt.
+		FencingToken: strings.TrimSpace(req.FencingToken),
 	}); err != nil {
 		return nil, err
 	}
@@ -132,7 +156,7 @@ func ApplyTerminalTaskOutcome(ctx context.Context, services TaskOutcomeApplyServ
 		Summary:   summary,
 		ResultRef: resultRef,
 	}
-	current, err := services.Store.GetTask(ctx, taskID)
+	current, err = services.Store.GetTask(ctx, taskID)
 	if err != nil {
 		return nil, err
 	}
@@ -227,6 +251,18 @@ func emitDedupedTerminalTaskEvent(ctx context.Context, store Store, events *Team
 	if taskID == "" {
 		return
 	}
+	if appender, ok := store.(terminalTaskEventOnceAppender); ok {
+		_, appended, err := appender.AppendTerminalTaskEventOnce(ctx, event)
+		if err != nil || !appended {
+			return
+		}
+		if events != nil {
+			events.Publish(event)
+		}
+		return
+	}
+	terminalTaskEventFallbackMu.Lock()
+	defer terminalTaskEventFallbackMu.Unlock()
 	if existing, err := store.ListTeamEvents(ctx, TeamEventFilter{
 		TeamID:    event.TeamID,
 		EventType: event.Type,
@@ -247,6 +283,12 @@ func emitDedupedTerminalTaskEvent(ctx context.Context, store Store, events *Team
 		events.Publish(event)
 	}
 }
+
+type terminalTaskEventOnceAppender interface {
+	AppendTerminalTaskEventOnce(ctx context.Context, event TeamEvent) (seq int64, appended bool, err error)
+}
+
+var terminalTaskEventFallbackMu sync.Mutex
 
 func teamEventPayloadString(value interface{}) string {
 	if value == nil {
@@ -271,6 +313,20 @@ func ApplyBlockedTaskOutcome(ctx context.Context, services TaskOutcomeApplyServi
 	if taskID == "" {
 		return nil, fmt.Errorf("task id is required")
 	}
+	current, err := services.Store.GetTask(ctx, taskID)
+	if err != nil {
+		return nil, err
+	}
+	if current == nil {
+		return nil, fmt.Errorf("task not found: %s", taskID)
+	}
+	if suppliedTeamID := strings.TrimSpace(req.Task.TeamID); suppliedTeamID != "" &&
+		!strings.EqualFold(strings.TrimSpace(current.TeamID), suppliedTeamID) {
+		return nil, fmt.Errorf("task does not belong to team: %s", taskID)
+	}
+	// Do not let caller-provided task or teammate identities leak into mailbox
+	// attribution, replanning, or the task transition.
+	req.Task = *current
 
 	outcome := req.Outcome
 	if outcome.Status == "" && strings.TrimSpace(outcome.HandoffTo) != "" {
@@ -297,10 +353,14 @@ func ApplyBlockedTaskOutcome(ctx context.Context, services TaskOutcomeApplyServi
 	teamRecord := req.Team
 	if strings.TrimSpace(teamRecord.ID) == "" {
 		teamRecord.ID = strings.TrimSpace(req.Task.TeamID)
+	} else if !strings.EqualFold(strings.TrimSpace(teamRecord.ID), strings.TrimSpace(req.Task.TeamID)) {
+		return nil, fmt.Errorf("task does not belong to team: %s", taskID)
 	}
-	teammateID := strings.TrimSpace(req.TeammateID)
-	if teammateID == "" && req.Task.Assignee != nil {
-		teammateID = strings.TrimSpace(*req.Task.Assignee)
+	teammateID := taskAssigneeID(req.Task)
+	if teammateID == "" {
+		// This is used for mailbox/event attribution only; the lifecycle
+		// writer never treats it as ownership when the task is unassigned.
+		teammateID = strings.TrimSpace(req.TeammateID)
 	}
 	handoffTo := strings.TrimSpace(normalized.HandoffTo)
 
@@ -311,6 +371,9 @@ func ApplyBlockedTaskOutcome(ctx context.Context, services TaskOutcomeApplyServi
 		Summary:         summary,
 		TeammateID:      teammateID,
 		SkipStateUpdate: req.SkipStateUpdate,
+		// Do not derive authorization from req.Task.FencingToken: a caller can
+		// read that snapshot without owning the active attempt.
+		FencingToken: strings.TrimSpace(req.FencingToken),
 	}); err != nil {
 		return nil, err
 	}
@@ -346,13 +409,22 @@ func ApplyBlockedTaskOutcome(ctx context.Context, services TaskOutcomeApplyServi
 	result.AutoReplan = autoReplan
 
 	if autoReplan && services.Planner != nil {
-		blockedTask := req.Task
-		blockedTask.Status = TaskStatusBlocked
-		blockedTask.Summary = summary
+		blockedTask, err := services.Store.GetTask(ctx, taskID)
+		if err != nil {
+			return nil, err
+		}
+		if blockedTask == nil {
+			return nil, fmt.Errorf("task not found after block: %s", taskID)
+		}
 
 		planner := *services.Planner
 		planner.AutoPersist = true
-		planResult, err := planner.ReplanOnFailure(ctx, teamRecord, blockedTask)
+		planResult, err := planner.ReplanOnFailureWithVersion(
+			ctx,
+			teamRecord,
+			*blockedTask,
+			blockedTask.Version,
+		)
 		if err != nil {
 			result.ReplanError = err.Error()
 			if sessionErr, ok := AsSessionExecutionError(err); ok && sessionErr != nil {

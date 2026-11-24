@@ -2,7 +2,9 @@ package team
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -323,6 +325,12 @@ func TestAgentControlTaskRegistryUpdatesTask(t *testing.T) {
 	taskSubject := "split store helpers"
 	readPaths := []string{"docs", "backend"}
 	registry := NewAgentControlTaskRegistry(store)
+	_, err = registry.ReleaseAgentControlTask(ctx, agentcontrol.TaskReleaseRequest{
+		ID:       taskID,
+		Workflow: agentcontrol.WorkflowSpawnTeam,
+		Status:   status,
+	})
+	require.NoError(t, err)
 	record, err := registry.UpdateAgentControlTask(ctx, agentcontrol.TaskUpdateRequest{
 		ID:                  taskID,
 		Workflow:            agentcontrol.WorkflowSpawnTeam,
@@ -332,7 +340,6 @@ func TestAgentControlTaskRegistryUpdatesTask(t *testing.T) {
 		DifficultyRationale: &difficultyRationale,
 		TaskType:            &taskType,
 		TaskSubject:         &taskSubject,
-		Status:              &status,
 		Priority:            &priority,
 		Assignee:            &assignee,
 		ReadPaths:           &readPaths,
@@ -926,10 +933,16 @@ func TestAgentControlTaskRegistryUpdatesTaskStatus(t *testing.T) {
 	require.NoError(t, err)
 
 	registry := NewAgentControlTaskRegistry(store)
-	record, err := registry.UpdateAgentControlTaskStatus(ctx, agentcontrol.TaskStatusUpdateRequest{
+	_, err = registry.UpdateAgentControlTaskStatus(ctx, agentcontrol.TaskStatusUpdateRequest{
 		ID:       taskID,
 		Workflow: agentcontrol.WorkflowSpawnTeam,
 		Status:   string(TaskStatusBlocked),
+		Summary:  "waiting on dependency",
+	})
+	require.Error(t, err)
+	record, err := registry.BlockAgentControlTask(ctx, agentcontrol.TaskBlockRequest{
+		ID:       taskID,
+		Workflow: agentcontrol.WorkflowSpawnTeam,
 		Summary:  "waiting on dependency",
 	})
 	require.NoError(t, err)
@@ -1003,12 +1016,11 @@ func TestAgentControlTaskRegistryCancelledUpdatesReleaseLease(t *testing.T) {
 	require.Nil(t, statusTask.LeaseUntil)
 
 	cancelled := string(TaskStatusCancelled)
-	reassigned := "member-2"
-	record, err = registry.UpdateAgentControlTask(ctx, agentcontrol.TaskUpdateRequest{
+	record, err = registry.ReleaseAgentControlTask(ctx, agentcontrol.TaskReleaseRequest{
 		ID:       updateTaskID,
 		Workflow: agentcontrol.WorkflowSpawnTeam,
-		Status:   &cancelled,
-		Assignee: &reassigned,
+		Status:   cancelled,
+		Summary:  "update cancelled",
 	})
 	require.NoError(t, err)
 	require.NotNil(t, record)
@@ -1053,7 +1065,14 @@ func TestAgentControlTaskRegistryTerminalStatusUpdatesReleaseLease(t *testing.T)
 	require.NoError(t, err)
 
 	registry := NewAgentControlTaskRegistry(store)
-	record, err := registry.UpdateAgentControlTaskStatus(ctx, agentcontrol.TaskStatusUpdateRequest{
+	_, err = registry.UpdateAgentControlTaskStatus(ctx, agentcontrol.TaskStatusUpdateRequest{
+		ID:       statusTaskID,
+		Workflow: agentcontrol.WorkflowSpawnTeam,
+		Status:   string(TaskStatusDone),
+		Summary:  "status done",
+	})
+	require.Error(t, err)
+	record, err := registry.UpdateAgentControlTaskTerminal(ctx, agentcontrol.TaskTerminalUpdateRequest{
 		ID:       statusTaskID,
 		Workflow: agentcontrol.WorkflowSpawnTeam,
 		Status:   string(TaskStatusDone),
@@ -1073,12 +1092,12 @@ func TestAgentControlTaskRegistryTerminalStatusUpdatesReleaseLease(t *testing.T)
 	require.Nil(t, statusTask.LeaseUntil)
 
 	failed := string(TaskStatusFailed)
-	reassigned := "member-2"
-	record, err = registry.UpdateAgentControlTask(ctx, agentcontrol.TaskUpdateRequest{
-		ID:       updateTaskID,
-		Workflow: agentcontrol.WorkflowSpawnTeam,
-		Status:   &failed,
-		Assignee: &reassigned,
+	record, err = registry.UpdateAgentControlTaskTerminal(ctx, agentcontrol.TaskTerminalUpdateRequest{
+		ID:         updateTaskID,
+		Workflow:   agentcontrol.WorkflowSpawnTeam,
+		Status:     failed,
+		Summary:    "status failed",
+		TeammateID: assignee,
 	})
 	require.NoError(t, err)
 	require.NotNil(t, record)
@@ -1164,9 +1183,10 @@ func TestAgentControlTaskRegistryClaimsTaskWithPathClaims(t *testing.T) {
 	require.NoError(t, err)
 	assignee := "member-1"
 	_, err = store.UpsertTeammate(ctx, Teammate{
-		ID:     assignee,
-		TeamID: teamID,
-		State:  TeammateStateIdle,
+		ID:        assignee,
+		TeamID:    teamID,
+		SessionID: "session-1",
+		State:     TeammateStateIdle,
 	})
 	require.NoError(t, err)
 	taskID, err := store.CreateTask(ctx, Task{
@@ -1428,6 +1448,71 @@ func TestAgentControlTaskRegistryRetriesTask(t *testing.T) {
 	require.Nil(t, updated.LeaseUntil)
 	require.Equal(t, 1, updated.RetryCount)
 	require.Equal(t, "retry through agentcontrol", updated.Summary)
+}
+
+func TestAgentControlTaskRegistryRetryUsesAtomicVersionFence(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewSQLiteStore(&StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	require.NoError(t, err)
+	defer store.Close()
+
+	teamID, err := store.CreateTeam(ctx, Team{ID: "team-retry-version"})
+	require.NoError(t, err)
+	taskID, err := store.CreateTask(ctx, Task{
+		ID:     "task-retry-version",
+		TeamID: teamID,
+		Title:  "Version fenced retry",
+		Status: TaskStatusRunning,
+	})
+	require.NoError(t, err)
+	task, err := store.GetTask(ctx, taskID)
+	require.NoError(t, err)
+	require.NotNil(t, task)
+	require.Positive(t, task.Version)
+
+	registry := NewAgentControlTaskRegistry(store)
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	var workers sync.WaitGroup
+	for range 2 {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			<-start
+			_, retryErr := registry.RetryAgentControlTask(ctx, agentcontrol.TaskRetryRequest{
+				ID:              taskID,
+				Workflow:        agentcontrol.WorkflowSpawnTeam,
+				Status:          string(TaskStatusReady),
+				ExpectedVersion: task.Version,
+			})
+			results <- retryErr
+		}()
+	}
+	close(start)
+	workers.Wait()
+	close(results)
+
+	successes := 0
+	conflicts := 0
+	for retryErr := range results {
+		switch {
+		case retryErr == nil:
+			successes++
+		case errors.Is(retryErr, agentcontrol.ErrTaskVersionConflict):
+			conflicts++
+		default:
+			require.NoError(t, retryErr)
+		}
+	}
+	require.Equal(t, 1, successes)
+	require.Equal(t, 1, conflicts)
+
+	updated, err := store.GetTask(ctx, taskID)
+	require.NoError(t, err)
+	require.NotNil(t, updated)
+	require.Equal(t, TaskStatusReady, updated.Status)
+	require.Equal(t, 1, updated.RetryCount)
+	require.Equal(t, task.Version+1, updated.Version)
 }
 
 func TestAgentControlTaskRegistryRenewsTaskLease(t *testing.T) {

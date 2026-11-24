@@ -187,6 +187,15 @@ const toolCompletedDisplayOutputMaxBytes = 16 * 1024
 // 缩进与 shell 输出排版。
 func toolCompletedDisplayOutput(result toolExecutionResult) string {
 	output := extractToolTextOutput(result.Output)
+	// Broker tools may deliberately provide a cache-safe presentation summary
+	// (for example team_wait's terminal/summary/cursor receipt). Keep the raw
+	// structured result for the model/protocol payload, but prefer that explicit
+	// summary for the human-facing transcript instead of dumping JSON.
+	if result.Envelope != nil && result.Envelope.Metadata["summary_override"] == true {
+		if summary := strings.TrimSpace(result.Envelope.Summary); summary != "" {
+			output = summary
+		}
+	}
 	if strings.TrimSpace(output) == "" {
 		return ""
 	}

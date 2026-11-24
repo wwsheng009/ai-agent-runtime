@@ -1,3 +1,10 @@
+import type {
+  RuntimeTeamCapabilityState,
+  RuntimeTeamSummaryState,
+} from "./team-product";
+
+export * from "./team-product";
+
 export type RuntimeTeamRecord = {
   id: string;
   workspace_id?: string;
@@ -10,6 +17,22 @@ export type RuntimeTeamRecord = {
   updated_at?: string;
 };
 
+export type RuntimeTeamResponse = {
+  team: RuntimeTeamRecord;
+  team_id?: string;
+  compatibility_mode?: "legacy_team_view" | "none" | string;
+  team_version?: number | null;
+  version_supported?: boolean;
+  team_status?: string;
+  event_seq?: number;
+  event_seq_available?: boolean;
+  cursor_scope?: "team_local" | string;
+  summary_state?: RuntimeTeamSummaryState;
+  capabilities?: Record<string, RuntimeTeamCapabilityState | string>;
+  request_id?: string;
+  trace_id?: string;
+};
+
 export type RuntimeTeamsResponse = {
   teams: RuntimeTeamRecord[];
   count: number;
@@ -17,6 +40,13 @@ export type RuntimeTeamsResponse = {
   team_ids?: string[];
   workspace_id?: string;
   status?: string;
+  compatibility_mode?: "legacy_team_view" | "none" | string;
+  team_version?: number | null;
+  version_supported?: boolean;
+  cursor_scope?: "team_local" | string;
+  capabilities?: Record<string, RuntimeTeamCapabilityState | string>;
+  request_id?: string;
+  trace_id?: string;
 };
 
 export type RuntimeTeamSummaryCounts = Record<string, number>;
@@ -55,6 +85,69 @@ export type RuntimeTeamSummariesResponse = {
 export type RuntimeTeamFinalSummaryResponse = {
   team_id: string;
   summary: string;
+  summary_state?: RuntimeTeamSummaryState;
+  request_id?: string;
+};
+
+export type RuntimeTeamPreflightFinding = {
+  severity: "blocker" | "warning" | "info" | string;
+  code: string;
+  message: string;
+  remediation?: string;
+  team_id?: string;
+  teammate_id?: string;
+  related_teammate_id?: string;
+  task_id?: string;
+  related_task_id?: string;
+  depends_on_id?: string;
+  path?: string;
+  related_path?: string;
+  existing_owner?: string;
+  existing_mode?: string;
+};
+
+export type RuntimeTeamRoutePreview = {
+  task_id?: string;
+  teammate_id?: string;
+  session_id?: string;
+  capability: string;
+  route?: Record<string, unknown>;
+  disabled?: boolean;
+  strict?: boolean;
+  error?: string;
+};
+
+export type RuntimeTeamPreflightReport = {
+  team_id: string;
+  team_exists: boolean;
+  ready: boolean;
+  blocker_count: number;
+  warning_count: number;
+  info_count: number;
+  findings?: RuntimeTeamPreflightFinding[];
+  blockers?: RuntimeTeamPreflightFinding[];
+  warnings?: RuntimeTeamPreflightFinding[];
+  infos?: RuntimeTeamPreflightFinding[];
+  route_preview_capability?: string;
+  route_previews?: RuntimeTeamRoutePreview[];
+  team?: RuntimeTeamRecord;
+};
+
+export type RuntimeTeamPreflightResponse = {
+  team_id: string;
+  preflight: RuntimeTeamPreflightReport;
+  readiness: boolean;
+  compatibility_mode?: "legacy_team_view" | "none" | string;
+  team_version?: number | null;
+  version_supported?: boolean;
+  team_status?: string;
+  event_seq?: number;
+  event_seq_available?: boolean;
+  cursor_scope?: "team_local" | string;
+  summary_state?: RuntimeTeamSummaryState;
+  capabilities?: Record<string, RuntimeTeamCapabilityState | string>;
+  request_id?: string;
+  trace_id?: string;
 };
 
 export type RuntimeTeammateRecord = {
@@ -110,6 +203,7 @@ export type RuntimeTeamTask = {
   assignee?: string | null;
   lease_until?: string;
   retry_count?: number;
+  attempt?: number;
   read_paths?: string[];
   write_paths?: string[];
   deliverables?: string[];
@@ -190,6 +284,9 @@ export type RuntimeTeamEventsResponse = {
   team_id: string;
   events: RuntimeTeamEventRecord[];
   after?: number;
+  after_seq?: number;
+  latest_seq?: number;
+  next_cursor?: number;
   limit?: number;
   event_type?: string;
   since?: string | null;
@@ -281,6 +378,22 @@ export type RuntimeErrorEnvelope = {
   message?: string;
   /** 少数后端（如 OpenAI 兼容层）把消息放在嵌套的 `error` 字段里。 */
   error?: string;
+  category?:
+    | "validation"
+    | "authorization"
+    | "not_found"
+    | "conflict"
+    | "unavailable"
+    | "unsupported"
+    | "internal"
+    | string;
+  retryable?: boolean;
+  request_id?: string;
+  resource_id?: string;
+  current_version?: number;
+  expected_version?: number;
+  field_errors?: Record<string, string[]>;
+  remediation?: string;
 };
 
 export type RuntimeErrorPayload = {
@@ -293,7 +406,9 @@ export type RuntimeErrorPayload = {
 export type RuntimeTeamsQuery = {
   limit?: number;
   status?: string;
+  teamIds?: string[];
   workspaceId?: string;
+  signal?: AbortSignal;
 };
 
 export type RuntimeTeamSummariesQuery = {
@@ -303,11 +418,13 @@ export type RuntimeTeamSummariesQuery = {
   light?: boolean;
   limit?: number;
   teamIds?: string[];
+  signal?: AbortSignal;
 };
 
 export type RuntimeTeamTeammatesQuery = {
   limit?: number;
   state?: string;
+  signal?: AbortSignal;
 };
 
 export type RuntimeTeamTasksQuery = {
@@ -318,6 +435,7 @@ export type RuntimeTeamTasksQuery = {
   parentTaskId?: string;
   status?: string[];
   taskIds?: string[];
+  signal?: AbortSignal;
 };
 
 export type RuntimeTaskGraphQuery = {
@@ -327,14 +445,17 @@ export type RuntimeTaskGraphQuery = {
   parentTaskId?: string;
   status?: string[];
   taskIds?: string[];
+  signal?: AbortSignal;
 };
 
 export type RuntimeTeamEventsQuery = {
   after?: number;
+  afterSeq?: number;
   eventType?: string;
   limit?: number;
   since?: string;
   until?: string;
+  signal?: AbortSignal;
 };
 
 export type RuntimeTeamMailboxQuery = {
@@ -349,6 +470,7 @@ export type RuntimeTeamMailboxQuery = {
   taskId?: string;
   toAgent?: string;
   unreadOnly?: boolean;
+  signal?: AbortSignal;
 };
 
 export type RuntimeTeamPathClaimsQuery = {
@@ -358,6 +480,7 @@ export type RuntimeTeamPathClaimsQuery = {
   mode?: string;
   ownerAgentId?: string;
   taskId?: string;
+  signal?: AbortSignal;
 };
 
 export type RuntimeCheckTeamPathClaimsRequest = {

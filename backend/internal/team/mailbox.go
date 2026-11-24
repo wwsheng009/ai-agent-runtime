@@ -2,10 +2,15 @@ package team
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 )
+
+// ErrMailNotFound indicates that a receipt references no persisted Team
+// mailbox message.
+var ErrMailNotFound = errors.New("mail not found")
 
 // MailboxService provides higher-level helpers around team mailbox messages.
 type MailboxService struct {
@@ -16,6 +21,12 @@ type MailboxService struct {
 // can wake waiters after durable inserts.
 type MailWatcherStore interface {
 	WatchMail(ctx context.Context, teamID string) (<-chan MailMessage, func())
+}
+
+// MailReceiptOnceRecorder atomically records whether an acknowledgement was
+// new, allowing API callers to make replayed acknowledgements event-idempotent.
+type MailReceiptOnceRecorder interface {
+	RecordMailReceiptOnce(ctx context.Context, receipt MailReceipt) (bool, error)
 }
 
 // MailSequenceStore exposes the durable high-water mark for a team mailbox.

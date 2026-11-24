@@ -1,10 +1,13 @@
 package team
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -12,6 +15,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
+)
+
+const (
+	teamRunProcessDBEnv      = "AI_AGENT_TEAM_RUN_PROCESS_DB"
+	teamRunProcessOutputEnv  = "AI_AGENT_TEAM_RUN_PROCESS_OUTPUT"
+	teamRunProcessBarrierEnv = "AI_AGENT_TEAM_RUN_PROCESS_BARRIER"
 )
 
 type failingGlobalMailboxWriter struct{}
@@ -177,6 +186,13 @@ func TestSQLiteStoreMigratesAgentControlTaskDifficultyMetadata(t *testing.T) {
 	require.True(t, sqliteColumnExists(t, store.db, "agent_control_task_records", "fallback_reason"))
 	require.True(t, sqliteColumnExists(t, store.db, "agent_control_task_records", "route_resolved_at"))
 	require.True(t, sqliteColumnExists(t, store.db, "agent_control_task_records", "route_attempt"))
+	require.True(t, sqliteTableExists(t, store.db, "team_definitions"))
+	require.True(t, sqliteTableExists(t, store.db, "team_runs"))
+	require.True(t, sqliteColumnExists(t, store.db, "team_runs", "start_idempotency_key_hash"))
+	require.True(t, sqliteColumnExists(t, store.db, "team_runs", "start_request_digest"))
+	var latestMigration int
+	require.NoError(t, store.db.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_migrations`).Scan(&latestMigration))
+	require.Equal(t, 27, latestMigration)
 
 	legacy, err := store.GetTask(ctx, "legacy-task")
 	require.NoError(t, err)
@@ -216,6 +232,153 @@ func TestSQLiteStoreMigratesAgentControlTaskDifficultyMetadata(t *testing.T) {
 	require.NotNil(t, created)
 	assert.Equal(t, TaskDifficultyExpert, created.Difficulty)
 	assert.Equal(t, "Written after migration.", created.DifficultyRationale)
+
+	definition, err := store.CreateTeamDefinition(ctx, TeamDefinitionCreateRequest{
+		OwnerID:     "owner-migrated",
+		WorkspaceID: "workspace-migrated",
+		Name:        "Migrated Definition",
+		Config:      json.RawMessage(`{"roles":["builder"]}`),
+	})
+	require.NoError(t, err)
+	runRequest := TeamRunCreateRequest{
+		OwnerID:                   "owner-migrated",
+		WorkspaceID:               "workspace-migrated",
+		DefinitionID:              definition.ID,
+		ExpectedDefinitionVersion: definition.Version,
+		Goal:                      "Validate post-migration persistence",
+		IdempotencyKey:            "migration-reopen-run",
+	}
+	run, err := store.CreateTeamRunDraft(ctx, runRequest)
+	require.NoError(t, err)
+	require.NotNil(t, run)
+	require.NoError(t, store.Close())
+
+	reopened, err := NewSQLiteStore(&StoreConfig{Path: dbPath})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = reopened.Close() })
+	migratedTask, err := reopened.GetTask(ctx, "legacy-task")
+	require.NoError(t, err)
+	require.NotNil(t, migratedTask)
+	assert.Equal(t, "legacy title", migratedTask.Title)
+	createdTask, err := reopened.GetTask(ctx, "new-task")
+	require.NoError(t, err)
+	require.NotNil(t, createdTask)
+	assert.Equal(t, TaskDifficultyExpert, createdTask.Difficulty)
+
+	persistedDefinition, err := reopened.GetTeamDefinition(ctx, "owner-migrated", definition.ID)
+	require.NoError(t, err)
+	require.NotNil(t, persistedDefinition)
+	assert.Equal(t, definition.Version, persistedDefinition.Version)
+	assert.JSONEq(t, `{"roles":["builder"]}`, string(persistedDefinition.Config))
+	persistedRun, err := reopened.GetTeamRun(ctx, "owner-migrated", run.ID)
+	require.NoError(t, err)
+	require.NotNil(t, persistedRun)
+	assert.Equal(t, run.SnapshotChecksum, persistedRun.SnapshotChecksum)
+	replayedRun, err := reopened.CreateTeamRunDraft(ctx, runRequest)
+	require.NoError(t, err)
+	require.NotNil(t, replayedRun)
+	assert.Equal(t, run.ID, replayedRun.ID)
+}
+
+func TestSQLiteTeamRunDraftReplayAcrossProcessesCreatesSingleRun(t *testing.T) {
+	ctx := context.Background()
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "team-run-process.db")
+	bootstrap, err := NewSQLiteStore(&StoreConfig{Path: dbPath})
+	require.NoError(t, err)
+	require.NoError(t, bootstrap.ensure())
+	require.NoError(t, bootstrap.Close())
+
+	const processCount = 4
+	barrierPath := filepath.Join(tempDir, "start.signal")
+	commands := make([]*exec.Cmd, 0, processCount)
+	outputs := make([]*bytes.Buffer, 0, processCount)
+	outputPaths := make([]string, 0, processCount)
+	defer func() {
+		for _, command := range commands {
+			if command.Process != nil {
+				_ = command.Process.Kill()
+				_ = command.Wait()
+			}
+		}
+	}()
+
+	for index := range processCount {
+		outputPath := filepath.Join(tempDir, fmt.Sprintf("process-%d.run-id", index))
+		outputPaths = append(outputPaths, outputPath)
+		command := exec.Command(os.Args[0], "-test.run=^TestSQLiteTeamRunDraftReplayProcessWorker$")
+		command.Env = append(os.Environ(),
+			teamRunProcessDBEnv+"="+dbPath,
+			teamRunProcessOutputEnv+"="+outputPath,
+			teamRunProcessBarrierEnv+"="+barrierPath,
+		)
+		output := &bytes.Buffer{}
+		command.Stdout = output
+		command.Stderr = output
+		require.NoError(t, command.Start())
+		commands = append(commands, command)
+		outputs = append(outputs, output)
+	}
+
+	require.NoError(t, os.WriteFile(barrierPath, []byte("go"), 0o600))
+	for index, command := range commands {
+		require.NoErrorf(t, command.Wait(), "worker %d output: %s", index, outputs[index].String())
+	}
+
+	var runID string
+	for _, outputPath := range outputPaths {
+		contents, err := os.ReadFile(outputPath)
+		require.NoError(t, err)
+		if runID == "" {
+			runID = string(contents)
+		}
+		assert.Equal(t, runID, string(contents))
+	}
+	require.NotEmpty(t, runID)
+
+	reopened, err := NewSQLiteStore(&StoreConfig{Path: dbPath})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = reopened.Close() })
+	runs, err := reopened.ListTeamRuns(ctx, "owner-process", "workspace-process", 10)
+	require.NoError(t, err)
+	require.Len(t, runs, 1)
+	assert.Equal(t, runID, runs[0].ID)
+}
+
+func TestSQLiteTeamRunDraftReplayProcessWorker(t *testing.T) {
+	dbPath := os.Getenv(teamRunProcessDBEnv)
+	if dbPath == "" {
+		t.Skip("subprocess helper")
+	}
+	outputPath := os.Getenv(teamRunProcessOutputEnv)
+	barrierPath := os.Getenv(teamRunProcessBarrierEnv)
+	require.NotEmpty(t, outputPath)
+	require.NotEmpty(t, barrierPath)
+
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		if _, err := os.Stat(barrierPath); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for process start barrier")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	store, err := NewSQLiteStore(&StoreConfig{Path: dbPath})
+	require.NoError(t, err)
+	defer func() { _ = store.Close() }()
+	run, err := store.CreateTeamRunDraft(context.Background(), TeamRunCreateRequest{
+		OwnerID:        "owner-process",
+		WorkspaceID:    "workspace-process",
+		Goal:           "Concurrent process idempotency",
+		Config:         json.RawMessage(`{"workers":4}`),
+		IdempotencyKey: "process-replay-key",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, run)
+	require.NoError(t, os.WriteFile(outputPath, []byte(run.ID), 0o600))
 }
 
 func sqliteColumnExists(t *testing.T, db *sql.DB, table, column string) bool {
@@ -239,6 +402,14 @@ func sqliteColumnExists(t *testing.T, db *sql.DB, table, column string) bool {
 	}
 	require.NoError(t, rows.Err())
 	return false
+}
+
+func sqliteTableExists(t *testing.T, db *sql.DB, table string) bool {
+	t.Helper()
+	var exists int
+	err := db.QueryRow(`SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?)`, table).Scan(&exists)
+	require.NoError(t, err)
+	return exists == 1
 }
 
 func TestSQLiteStoreClaimTaskDoesNotRequireLegacyTaskMirror(t *testing.T) {

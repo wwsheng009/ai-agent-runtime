@@ -1653,6 +1653,7 @@ type SessionTeamRunMeta struct {
 	TeamID        string `json:"team_id,omitempty"`
 	AgentID       string `json:"agent_id,omitempty"`
 	CurrentTaskID string `json:"current_task_id,omitempty"`
+	FencingToken  string `json:"fencing_token,omitempty"`
 }
 
 type SessionRunMeta struct {
@@ -1670,6 +1671,7 @@ type TeamTask struct {
 	Priority     int        `json:"priority,omitempty"`
 	Assignee     *string    `json:"assignee,omitempty"`
 	LeaseUntil   *time.Time `json:"lease_until,omitempty"`
+	FencingToken string     `json:"fencing_token,omitempty"`
 	RetryCount   int        `json:"retry_count,omitempty"`
 	ReadPaths    []string   `json:"read_paths,omitempty"`
 	WritePaths   []string   `json:"write_paths,omitempty"`
@@ -1689,6 +1691,7 @@ type AgentControlTaskRecord struct {
 	Assignee     string     `json:"assignee,omitempty"`
 	SessionID    string     `json:"session_id,omitempty"`
 	Path         string     `json:"path,omitempty"`
+	FencingToken string     `json:"fencing_token,omitempty"`
 	Title        string     `json:"title,omitempty"`
 	Summary      string     `json:"summary,omitempty"`
 	Status       string     `json:"status,omitempty"`
@@ -1820,14 +1823,15 @@ type GetTaskGraphResponse struct {
 }
 
 type ReportTaskOutcomeRequest struct {
-	TaskStatus string `json:"task_status,omitempty"`
-	Summary    string `json:"summary,omitempty"`
-	Blocker    string `json:"blocker,omitempty"`
-	HandoffTo  string `json:"handoff_to,omitempty"`
-	ResultRef  string `json:"result_ref,omitempty"`
-	TeammateID string `json:"teammate_id,omitempty"`
-	NotifyLead *bool  `json:"notify_lead,omitempty"`
-	AutoReplan *bool  `json:"auto_replan,omitempty"`
+	TaskStatus   string `json:"task_status,omitempty"`
+	Summary      string `json:"summary,omitempty"`
+	Blocker      string `json:"blocker,omitempty"`
+	HandoffTo    string `json:"handoff_to,omitempty"`
+	ResultRef    string `json:"result_ref,omitempty"`
+	TeammateID   string `json:"teammate_id,omitempty"`
+	FencingToken string `json:"fencing_token,omitempty"`
+	NotifyLead   *bool  `json:"notify_lead,omitempty"`
+	AutoReplan   *bool  `json:"auto_replan,omitempty"`
 }
 
 type ReportTaskOutcomeResponse struct {
@@ -1966,9 +1970,10 @@ type UpdateAgentControlTaskRequest struct {
 }
 
 type UpdateAgentControlTaskStatusRequest struct {
-	Workflow string `json:"workflow,omitempty"`
-	Status   string `json:"status,omitempty"`
-	Summary  string `json:"summary,omitempty"`
+	Workflow     string `json:"workflow,omitempty"`
+	Status       string `json:"status,omitempty"`
+	Summary      string `json:"summary,omitempty"`
+	FencingToken string `json:"fencing_token,omitempty"`
 }
 
 type ClaimAgentControlTaskRequest struct {
@@ -1985,16 +1990,18 @@ type ClaimAgentControlTaskRequest struct {
 }
 
 type RenewAgentControlTaskLeaseRequest struct {
-	Workflow    string `json:"workflow,omitempty"`
-	LeaseUntil  string `json:"lease_until,omitempty"`
-	DurationSec int    `json:"duration_sec,omitempty"`
+	Workflow     string `json:"workflow,omitempty"`
+	LeaseUntil   string `json:"lease_until,omitempty"`
+	DurationSec  int    `json:"duration_sec,omitempty"`
+	FencingToken string `json:"fencing_token,omitempty"`
 }
 
 type ReleaseAgentControlTaskRequest struct {
-	Workflow   string `json:"workflow,omitempty"`
-	Status     string `json:"status,omitempty"`
-	Summary    string `json:"summary,omitempty"`
-	TeammateID string `json:"teammate_id,omitempty"`
+	Workflow     string `json:"workflow,omitempty"`
+	Status       string `json:"status,omitempty"`
+	Summary      string `json:"summary,omitempty"`
+	TeammateID   string `json:"teammate_id,omitempty"`
+	FencingToken string `json:"fencing_token,omitempty"`
 }
 
 type UpdateAgentControlTaskTerminalRequest struct {
@@ -2005,6 +2012,7 @@ type UpdateAgentControlTaskTerminalRequest struct {
 	ResultRef       *string `json:"result_ref,omitempty"`
 	TeammateID      string  `json:"teammate_id,omitempty"`
 	SkipStateUpdate bool    `json:"skip_state_update,omitempty"`
+	FencingToken    string  `json:"fencing_token,omitempty"`
 }
 
 type BlockAgentControlTaskRequest struct {
@@ -2012,6 +2020,7 @@ type BlockAgentControlTaskRequest struct {
 	Summary         string `json:"summary,omitempty"`
 	TeammateID      string `json:"teammate_id,omitempty"`
 	SkipStateUpdate bool   `json:"skip_state_update,omitempty"`
+	FencingToken    string `json:"fencing_token,omitempty"`
 }
 
 type CreateAgentControlTaskDependencyRequest struct {
@@ -2173,7 +2182,8 @@ type MarkReadyTasksResponse struct {
 }
 
 type ReplanTaskRequest struct {
-	AutoPersist bool `json:"auto_persist,omitempty"`
+	AutoPersist     bool  `json:"auto_persist,omitempty"`
+	ExpectedVersion int64 `json:"expected_version"`
 }
 
 type ReplanTaskResponse struct {

@@ -431,9 +431,10 @@ func TestSyncTeamLifecycleLoopsSignalsExistingLoop(t *testing.T) {
 	})
 	require.NoError(t, err)
 	_, err = store.UpsertTeammate(ctx, team.Teammate{
-		ID:     "mate-a",
-		TeamID: teamID,
-		State:  team.TeammateStateIdle,
+		ID:        "mate-a",
+		TeamID:    teamID,
+		SessionID: "session-mate-a",
+		State:     team.TeammateStateIdle,
 	})
 	require.NoError(t, err)
 	_, err = store.UpsertTeammate(ctx, team.Teammate{

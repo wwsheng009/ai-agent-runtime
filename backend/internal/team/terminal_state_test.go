@@ -283,6 +283,30 @@ func TestReconcileTerminalTeamStateDoesNotCompleteEmptyActiveTeam(t *testing.T) 
 	assert.Empty(t, events)
 }
 
+func TestReconcileTerminalTeamStateWaitsForReclaimPendingTask(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	teamID, err := store.CreateTeam(ctx, Team{Status: TeamStatusActive})
+	require.NoError(t, err)
+	_, err = store.CreateTask(ctx, Task{
+		ID:           "task-reclaim-pending",
+		TeamID:       teamID,
+		Status:       TaskStatusReclaimPending,
+		FencingToken: "attempt-token",
+	})
+	require.NoError(t, err)
+
+	result, err := ReconcileTerminalTeamState(ctx, TerminalTeamServices{Store: store}, teamID)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.False(t, result.Terminal, "team must stay active during the reclaim grace window")
+
+	record, err := store.GetTeam(ctx, teamID)
+	require.NoError(t, err)
+	require.NotNil(t, record)
+	assert.Equal(t, TeamStatusActive, record.Status)
+}
+
 func TestReconcileTerminalTeamStateWaitsForBusyTeammate(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)

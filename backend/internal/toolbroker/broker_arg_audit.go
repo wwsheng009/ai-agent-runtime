@@ -55,11 +55,11 @@ var brokerToolArgKeys = map[string][]string{
 	},
 	ToolTeamTaskReport: {
 		"auto_replan", "blocker", "handoff_to", "notify_lead",
-		"result_ref", "summary", "task_id", "task_status", "team_id",
+		"fencing_token", "result_ref", "summary", "task_id", "task_status", "team_id",
 	},
 	ToolTeamTaskBlock: {
 		"auto_replan", "blocker", "handoff_to", "notify_lead",
-		"summary", "task_id", "task_status", "team_id",
+		"fencing_token", "summary", "task_id", "task_status", "team_id",
 	},
 	ToolSupervisionSnapshot:    {"after_seq", "include_resolved", "limit"},
 	ToolSupervisionDescendants: {"after_seq", "batch_id", "health", "include_results", "include_terminal", "limit", "mode", "scope"},

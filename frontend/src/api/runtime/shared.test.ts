@@ -104,6 +104,53 @@ describe("runtime shared helpers", () => {
     expect(isRuntimeApiErrorCode(error, "SESSION_LEASE_CONFLICT")).toBe(true);
     expect(isRuntimeApiErrorCode(error, "VALIDATION_FAILED")).toBe(false);
   });
+
+  it("preserves Retry-After hints from failed responses", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async () =>
+      new Response(JSON.stringify({ error: "try again later" }), {
+        status: 503,
+        headers: {
+          "Content-Type": "application/json",
+          "Retry-After": "2",
+        },
+      }),
+    ) as unknown as typeof fetch;
+
+    try {
+      const error = await fetchRuntimeJson("/api/runtime/team-runs").catch(
+        (value: unknown) => value,
+      );
+      expect(error).toBeInstanceOf(RuntimeApiError);
+      expect((error as RuntimeApiError).status).toBe(503);
+      expect((error as RuntimeApiError).retryAfterMs).toBe(2_000);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("parses HTTP-date Retry-After values and ignores elapsed delays", () => {
+    vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-11-22T12:00:00Z"));
+
+    try {
+      const retryAt = new Date(Date.now() + 2_000).toUTCString();
+      const futureError = new RuntimeApiError(
+        503,
+        null,
+        new Headers({ "Retry-After": retryAt }),
+      );
+      const elapsedError = new RuntimeApiError(
+        503,
+        null,
+        new Headers({ "Retry-After": "Sun, 22 Nov 2026 11:59:59 GMT" }),
+      );
+
+      expect(futureError.retryAfterMs).toBe(2_000);
+      expect(elapsedError.retryAfterMs).toBe(0);
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
 });
 
 // 回归：/fs/*、/git/* 端点返回 `{"error":{"code":…,"message":…}}`。

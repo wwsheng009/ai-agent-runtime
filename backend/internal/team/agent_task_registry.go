@@ -46,6 +46,23 @@ type agentControlTaskRouteAuditUpdateStore interface {
 	UpdateAgentControlTaskRouteAudit(ctx context.Context, request agentcontrol.TaskRouteAuditUpdateRequest) (*agentcontrol.TaskRecord, error)
 }
 
+type agentControlOwnerFencedTaskClaimer interface {
+	ClaimTaskWithOwnerFence(ctx context.Context, id, assignee string, leaseUntil time.Time, expectedVersion int64, ownerID, ownerToken string) (bool, error)
+	ClaimTaskWithPathClaimsAndOwnerFence(ctx context.Context, task Task, assignee string, leaseUntil time.Time, workspaceRoot, ownerID, ownerToken string) (bool, error)
+}
+
+type agentControlFencedTaskStore interface {
+	UpdateTaskStatusWithFencing(ctx context.Context, id string, status TaskStatus, summary, fencingToken string) error
+	RenewTaskLeaseWithFencing(ctx context.Context, id string, leaseUntil time.Time, fencingToken string) error
+	ReleaseTaskWithFencing(ctx context.Context, id string, status TaskStatus, summary, fencingToken string) error
+	RetryTaskWithFencing(ctx context.Context, id string, status TaskStatus, summary, fencingToken string, expectedVersion int64) error
+	BlockTaskWithFencing(ctx context.Context, id, summary, fencingToken string) error
+}
+
+type agentControlAtomicBlockTaskStore interface {
+	BlockTaskWithFencingAndState(ctx context.Context, id, summary, fencingToken string, skipStateUpdate bool) error
+}
+
 var _ agentcontrol.TaskRegistryReader = AgentControlTaskRegistry{}
 var _ agentcontrol.TaskRegistryCreateWriter = AgentControlTaskRegistry{}
 var _ agentcontrol.TaskRegistryUpdateWriter = AgentControlTaskRegistry{}
@@ -76,6 +93,18 @@ func NewAgentControlTaskRegistry(store Store) AgentControlTaskRegistry {
 func (r AgentControlTaskRegistry) WithClaims(claims *PathClaimManager) AgentControlTaskRegistry {
 	r.Claims = claims
 	return r
+}
+
+func taskFencingMatches(current *Task, supplied string) error {
+	if current == nil {
+		return fmt.Errorf("task not found")
+	}
+	currentToken := strings.TrimSpace(current.FencingToken)
+	supplied = strings.TrimSpace(supplied)
+	if currentToken != supplied {
+		return agentcontrol.ErrTaskFencingMismatch
+	}
+	return nil
 }
 
 func (r AgentControlTaskRegistry) releasePathClaims(ctx context.Context, taskID string) {
@@ -135,6 +164,7 @@ func (r AgentControlTaskRegistry) ActiveTaskForAssignee(ctx context.Context, tea
 		Assignee: assignee,
 		Status: []string{
 			string(TaskStatusRunning),
+			string(TaskStatusReclaimPending),
 			string(TaskStatusReady),
 			string(TaskStatusBlocked),
 			string(TaskStatusPending),
@@ -402,6 +432,30 @@ func (r AgentControlTaskRegistry) UpdateAgentControlTask(ctx context.Context, re
 	if request.TeamID != "" && !strings.EqualFold(strings.TrimSpace(task.TeamID), request.TeamID) {
 		return nil, fmt.Errorf("task does not belong to team: %s", request.ID)
 	}
+	if request.Status != nil && TaskStatus(*request.Status) == TaskStatusCancelled {
+		// Cancellation is a control-plane revocation, not an executor
+		// result. It may intentionally revoke an active claim without
+		// presenting the executor's fencing token.
+		summary := ""
+		if request.Summary != nil {
+			summary = *request.Summary
+		}
+		return r.ReleaseAgentControlTask(ctx, agentcontrol.TaskReleaseRequest{
+			ID:       request.ID,
+			Workflow: agentcontrol.WorkflowSpawnTeam,
+			Status:   string(TaskStatusCancelled),
+			Summary:  summary,
+		})
+	}
+	if task.Status == TaskStatusRunning || task.Status == TaskStatusReclaimPending {
+		if request.Status != nil && TaskStatus(*request.Status) != task.Status {
+			return nil, fmt.Errorf("%w: active task status must use a controlled lifecycle action", agentcontrol.ErrTaskLifecycleActionRequired)
+		}
+		if strings.TrimSpace(task.FencingToken) != "" &&
+			(request.Status != nil || request.Assignee != nil || request.ReadPaths != nil || request.WritePaths != nil) {
+			return nil, fmt.Errorf("%w: claimed active task lifecycle fields must use a fenced task action", agentcontrol.ErrTaskLifecycleActionRequired)
+		}
+	}
 	if request.ParentTaskID != nil {
 		if *request.ParentTaskID == "" {
 			task.ParentTaskID = nil
@@ -432,14 +486,15 @@ func (r AgentControlTaskRegistry) UpdateAgentControlTask(ctx context.Context, re
 	if request.TaskSubject != nil {
 		task.TaskSubject = *request.TaskSubject
 	}
-	closedStatusUpdate := false
 	if request.Status != nil && *request.Status != "" {
 		status := TaskStatus(*request.Status)
 		if !isAgentControlWritableTaskStatus(status) {
 			return nil, fmt.Errorf("unsupported task status: %s", *request.Status)
 		}
+		if status != task.Status {
+			return nil, fmt.Errorf("%w: task status transitions must use a dedicated lifecycle action", agentcontrol.ErrTaskLifecycleActionRequired)
+		}
 		task.Status = status
-		closedStatusUpdate = isAgentControlClosedTaskStatus(status)
 	}
 	if request.Priority != nil {
 		task.Priority = *request.Priority
@@ -474,10 +529,6 @@ func (r AgentControlTaskRegistry) UpdateAgentControlTask(ctx context.Context, re
 			value := *request.ResultRef
 			task.ResultRef = &value
 		}
-	}
-	if closedStatusUpdate {
-		task.Assignee = nil
-		task.LeaseUntil = nil
 	}
 	if writer, ok := r.Store.(agentControlTaskRecordUpdateStore); ok {
 		err = writer.UpdateAgentControlTaskRecord(ctx, *task)
@@ -952,21 +1003,34 @@ func (r AgentControlTaskRegistry) ClaimAgentControlTask(ctx context.Context, req
 	if request.LeaseUntil.IsZero() {
 		return nil, false, fmt.Errorf("lease_until is required")
 	}
+	task, err := r.Store.GetTask(ctx, request.ID)
+	if err != nil {
+		return nil, false, err
+	}
+	if task == nil {
+		return nil, false, nil
+	}
+	teamID := strings.TrimSpace(task.TeamID)
+	if teamID == "" || (request.TeamID != "" && request.TeamID != teamID) {
+		return nil, false, nil
+	}
+	teamRecord, err := r.Store.GetTeam(ctx, teamID)
+	if err != nil {
+		return nil, false, err
+	}
+	if teamRecord == nil || teamRecord.Status != TeamStatusActive {
+		return nil, false, nil
+	}
+	request.TeamID = teamID
+	ownerFencedClaimer, hasAtomicOwnerFence := r.Store.(agentControlOwnerFencedTaskClaimer)
 	if request.OwnerToken != "" {
-		ownerTeamID := request.TeamID
-		if ownerTeamID == "" {
-			existing, err := r.Store.GetTask(ctx, request.ID)
-			if err != nil {
-				return nil, false, err
-			}
-			if existing != nil {
-				ownerTeamID = existing.TeamID
-			}
+		if !hasAtomicOwnerFence {
+			// An owner lease is only useful when the claim predicate checks it
+			// in the same transaction. Do not validate it and then fall back to
+			// an unfenced claim: the lease can rotate between those operations.
+			return nil, false, agentcontrol.ErrTaskFencingUnsupported
 		}
-		if ownerTeamID == "" {
-			return nil, false, fmt.Errorf("team id is required for owner-fenced claim")
-		}
-		valid, err := r.Store.ValidateOrchestratorOwner(ctx, ownerTeamID, request.OwnerID, request.OwnerToken)
+		valid, err := r.Store.ValidateOrchestratorOwner(ctx, teamID, request.OwnerID, request.OwnerToken)
 		if err != nil {
 			return nil, false, err
 		}
@@ -974,49 +1038,57 @@ func (r AgentControlTaskRegistry) ClaimAgentControlTask(ctx context.Context, req
 			return nil, false, agentcontrol.ErrOrchestratorOwnerMismatch
 		}
 	}
+	assigneeMate, err := r.Store.GetTeammate(ctx, request.Assignee)
+	if err != nil {
+		return nil, false, err
+	}
+	if assigneeMate == nil ||
+		strings.TrimSpace(assigneeMate.TeamID) != teamID ||
+		assigneeMate.State != TeammateStateIdle ||
+		strings.TrimSpace(assigneeMate.SessionID) == "" {
+		return nil, false, nil
+	}
 
 	claimed := false
 	if request.UsePathClaims {
-		task := Task{
-			ID:         request.ID,
-			TeamID:     request.TeamID,
-			ReadPaths:  request.ReadPaths,
-			WritePaths: request.WritePaths,
-			Version:    request.ExpectedVersion,
+		claimTask := *task
+		claimTask.ID = request.ID
+		claimTask.TeamID = teamID
+		if request.ExpectedVersion > 0 {
+			claimTask.Version = request.ExpectedVersion
 		}
-		if task.TeamID == "" {
-			existing, err := r.Store.GetTask(ctx, request.ID)
-			if err != nil {
-				return nil, false, err
-			}
-			if existing == nil {
-				return nil, false, nil
-			}
-			task.TeamID = existing.TeamID
-			if request.ExpectedVersion <= 0 {
-				task.Version = existing.Version
-			}
-			if len(request.ReadPaths) == 0 {
-				task.ReadPaths = existing.ReadPaths
-			}
-			if len(request.WritePaths) == 0 {
-				task.WritePaths = existing.WritePaths
-			}
+		if len(request.ReadPaths) > 0 {
+			claimTask.ReadPaths = append([]string(nil), request.ReadPaths...)
+		}
+		if len(request.WritePaths) > 0 {
+			claimTask.WritePaths = append([]string(nil), request.WritePaths...)
 		}
 		var err error
-		claimed, err = r.Store.ClaimTaskWithPathClaims(ctx, task, request.Assignee, request.LeaseUntil, request.WorkspaceRoot)
+		if request.OwnerToken != "" && hasAtomicOwnerFence {
+			claimed, err = ownerFencedClaimer.ClaimTaskWithPathClaimsAndOwnerFence(
+				ctx, claimTask, request.Assignee, request.LeaseUntil, request.WorkspaceRoot, request.OwnerID, request.OwnerToken,
+			)
+		} else {
+			claimed, err = r.Store.ClaimTaskWithPathClaims(ctx, claimTask, request.Assignee, request.LeaseUntil, request.WorkspaceRoot)
+		}
 		if err != nil || !claimed {
 			return nil, claimed, err
 		}
 	} else {
 		var err error
-		claimed, err = r.Store.ClaimTask(ctx, request.ID, request.Assignee, request.LeaseUntil, request.ExpectedVersion)
+		if request.OwnerToken != "" && hasAtomicOwnerFence {
+			claimed, err = ownerFencedClaimer.ClaimTaskWithOwnerFence(
+				ctx, request.ID, request.Assignee, request.LeaseUntil, request.ExpectedVersion, request.OwnerID, request.OwnerToken,
+			)
+		} else {
+			claimed, err = r.Store.ClaimTask(ctx, request.ID, request.Assignee, request.LeaseUntil, request.ExpectedVersion)
+		}
 		if err != nil || !claimed {
 			return nil, claimed, err
 		}
 	}
 
-	task, err := r.Store.GetTask(ctx, request.ID)
+	task, err = r.Store.GetTask(ctx, request.ID)
 	if err != nil {
 		return nil, true, err
 	}
@@ -1054,30 +1126,65 @@ func (r AgentControlTaskRegistry) UpdateAgentControlTaskTerminal(ctx context.Con
 		return nil, fmt.Errorf("unsupported terminal task status: %s", request.Status)
 	}
 	resultRef := normalizeOptionalTaskResultRef(request.ResultRef)
+	current, err := r.Store.GetTask(ctx, request.ID)
+	if err != nil {
+		return nil, err
+	}
+	if current == nil {
+		return nil, fmt.Errorf("task not found: %s", request.ID)
+	}
+	if request.TeamID != "" && !strings.EqualFold(strings.TrimSpace(current.TeamID), request.TeamID) {
+		return nil, fmt.Errorf("task does not belong to team: %s", request.ID)
+	}
+	// Only the task's persisted assignee may have its teammate state changed
+	// by a terminal transition. Never trust a caller-supplied teammate id as
+	// authority to idle an unrelated teammate.
+	request.TeammateID = taskAssigneeID(*current)
+	if IsTerminalTaskStatus(current.Status) {
+		if current.Status != status {
+			return nil, fmt.Errorf("terminal task status cannot be changed")
+		}
+		// A same-status replay is an idempotent no-op. It never writes or
+		// changes the terminal record, so the original attempt token need not
+		// remain on the task after terminal persistence clears it.
+		record := AgentControlTaskRecord(*current, nil)
+		if assignee := taskAssigneeID(*current); assignee != "" {
+			if mate, mateErr := r.Store.GetTeammate(ctx, assignee); mateErr == nil && mate != nil {
+				record = AgentControlTaskRecord(*current, mate)
+			}
+		} else if teammateID := strings.TrimSpace(request.TeammateID); teammateID != "" {
+			if mate, mateErr := r.Store.GetTeammate(ctx, teammateID); mateErr == nil && mate != nil {
+				record = AgentControlTaskRecord(*current, mate)
+			}
+		}
+		return &record, nil
+	}
+	if strings.TrimSpace(current.FencingToken) != strings.TrimSpace(request.FencingToken) {
+		return nil, agentcontrol.ErrTaskFencingMismatch
+	}
 
 	if sqliteStore, ok := r.Store.(*SQLiteStore); ok {
 		if err := r.updateSQLiteTerminalTask(ctx, sqliteStore, request, status, resultRef); err != nil {
 			return nil, err
 		}
 	} else {
-		task, err := r.Store.GetTask(ctx, request.ID)
-		if err != nil {
-			return nil, err
+		if strings.TrimSpace(current.FencingToken) != "" || strings.TrimSpace(request.FencingToken) != "" {
+			return nil, agentcontrol.ErrTaskFencingUnsupported
 		}
-		if task == nil {
-			return nil, fmt.Errorf("task not found: %s", request.ID)
-		}
-		task.Status = status
-		task.Summary = request.Summary
-		task.ResultRef = resultRef
-		if err := r.Store.UpdateTask(ctx, *task); err != nil {
+		updated := *current
+		updated.Status = status
+		updated.Summary = request.Summary
+		updated.ResultRef = resultRef
+		if err := r.Store.UpdateTask(ctx, updated); err != nil {
 			return nil, err
 		}
 		if err := r.Store.ReleaseTask(ctx, request.ID, status); err != nil {
 			return nil, err
 		}
 		if request.TeammateID != "" && !request.SkipStateUpdate {
-			_ = r.Store.UpdateTeammateState(ctx, request.TeammateID, TeammateStateIdle)
+			if err := r.Store.UpdateTeammateState(ctx, request.TeammateID, TeammateStateIdle); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -1112,14 +1219,11 @@ func (r AgentControlTaskRegistry) updateSQLiteTerminalTask(ctx context.Context, 
 	for attempt := 0; attempt < 8; attempt++ {
 		err = store.WithImmediateTx(ctx, func(tx *sql.Tx) error {
 			now := time.Now().UTC()
-			where := "WHERE workflow = ? AND task_id = ?"
+			where := "WHERE workflow = ? AND task_id = ? AND fencing_token = ? AND status NOT IN (?, ?, ?)"
 			args := []interface{}{
 				string(status), request.Summary, nullableString(resultRef), formatTime(now),
-				agentcontrol.WorkflowSpawnTeam, request.ID,
-			}
-			if fencingToken != "" {
-				where += " AND fencing_token = ?"
-				args = append(args, fencingToken)
+				agentcontrol.WorkflowSpawnTeam, request.ID, fencingToken,
+				string(TaskStatusDone), string(TaskStatusFailed), string(TaskStatusCancelled),
 			}
 			result, err := tx.ExecContext(ctx, `
 				UPDATE agent_control_task_records
@@ -1130,14 +1234,18 @@ func (r AgentControlTaskRegistry) updateSQLiteTerminalTask(ctx context.Context, 
 			}
 			affected, _ := result.RowsAffected()
 			if affected == 0 {
-				needsDiagnosis = fencingToken != ""
+				needsDiagnosis = true
 				return nil
 			}
 			changed = true
 			if request.TeammateID != "" && !request.SkipStateUpdate {
 				if _, err := tx.ExecContext(ctx, `
-					UPDATE teammates SET state = ?, updated_at = ? WHERE id = ?
-				`, string(TeammateStateIdle), formatTime(now), request.TeammateID); err != nil {
+					UPDATE teammates SET state = ?, updated_at = ?
+					WHERE id = ? AND team_id = (
+						SELECT team_id FROM agent_control_task_records
+						WHERE workflow = ? AND task_id = ?
+					)
+				`, string(TeammateStateIdle), formatTime(now), request.TeammateID, agentcontrol.WorkflowSpawnTeam, request.ID); err != nil {
 					return fmt.Errorf("update teammate state: %w", err)
 				}
 			}
@@ -1162,8 +1270,19 @@ func (r AgentControlTaskRegistry) updateSQLiteTerminalTask(ctx context.Context, 
 		if loadErr != nil {
 			return loadErr
 		}
-		if existing != nil && strings.TrimSpace(existing.FencingToken) != fencingToken {
+		if existing == nil {
+			return fmt.Errorf("task not found: %s", request.ID)
+		}
+		if IsTerminalTaskStatus(existing.Status) {
+			if existing.Status != status {
+				return fmt.Errorf("terminal task status cannot be changed")
+			}
+			return nil
+		}
+		if strings.TrimSpace(existing.FencingToken) != fencingToken {
 			fencingMismatch = true
+		} else {
+			return fmt.Errorf("terminal update rejected for task %s in status %s", request.ID, existing.Status)
 		}
 	}
 	if fencingMismatch {
@@ -1191,11 +1310,55 @@ func (r AgentControlTaskRegistry) BlockAgentControlTask(ctx context.Context, req
 	if request.Summary == "" {
 		return nil, fmt.Errorf("summary is required")
 	}
-	if err := r.Store.BlockTask(ctx, request.ID, request.Summary); err != nil {
+	current, err := r.Store.GetTask(ctx, request.ID)
+	if err != nil {
 		return nil, err
 	}
-	if request.TeammateID != "" && !request.SkipStateUpdate {
-		_ = r.Store.UpdateTeammateState(ctx, request.TeammateID, TeammateStateBlocked)
+	if current == nil {
+		return nil, fmt.Errorf("task not found: %s", request.ID)
+	}
+	if IsTerminalTaskStatus(current.Status) {
+		return nil, fmt.Errorf("terminal task status cannot be changed")
+	}
+	if current.Status != TaskStatusRunning && current.Status != TaskStatusReclaimPending {
+		return nil, fmt.Errorf("only running tasks can be blocked")
+	}
+	token := strings.TrimSpace(request.FencingToken)
+	currentToken := strings.TrimSpace(current.FencingToken)
+	if currentToken != token {
+		return nil, agentcontrol.ErrTaskFencingMismatch
+	}
+	// The persisted assignee is authoritative. When the store supports it,
+	// update the task and teammate state in the same SQLite transaction so a
+	// blocked task cannot commit while its owner remains busy.
+	teammateID := taskAssigneeID(*current)
+	if atomicStore, ok := r.Store.(agentControlAtomicBlockTaskStore); ok {
+		if err := atomicStore.BlockTaskWithFencingAndState(
+			ctx, request.ID, request.Summary, token, request.SkipStateUpdate,
+		); err != nil {
+			return nil, err
+		}
+	} else if fencedStore, ok := r.Store.(agentControlFencedTaskStore); ok {
+		if err := fencedStore.BlockTaskWithFencing(ctx, request.ID, request.Summary, token); err != nil {
+			return nil, err
+		}
+		if teammateID != "" && !request.SkipStateUpdate {
+			if err := r.Store.UpdateTeammateState(ctx, teammateID, TeammateStateBlocked); err != nil {
+				return nil, err
+			}
+		}
+	} else {
+		if token != "" {
+			return nil, agentcontrol.ErrTaskFencingUnsupported
+		}
+		if err := r.Store.BlockTask(ctx, request.ID, request.Summary); err != nil {
+			return nil, err
+		}
+		if teammateID != "" && !request.SkipStateUpdate {
+			if err := r.Store.UpdateTeammateState(ctx, teammateID, TeammateStateBlocked); err != nil {
+				return nil, err
+			}
+		}
 	}
 	task, err := r.Store.GetTask(ctx, request.ID)
 	if err != nil {
@@ -1236,16 +1399,52 @@ func (r AgentControlTaskRegistry) UpdateAgentControlTaskStatus(ctx context.Conte
 	if !isAgentControlWritableTaskStatus(status) {
 		return nil, fmt.Errorf("unsupported task status: %s", request.Status)
 	}
-	if isAgentControlClosedTaskStatus(status) {
-		if err := r.Store.ReleaseTask(ctx, request.ID, status); err != nil {
+	if status == TaskStatusRunning {
+		return nil, fmt.Errorf("tasks can enter running only through claim")
+	}
+	current, err := r.Store.GetTask(ctx, request.ID)
+	if err != nil {
+		return nil, err
+	}
+	if current == nil {
+		return nil, fmt.Errorf("task not found: %s", request.ID)
+	}
+	if status == TaskStatusCancelled {
+		return r.ReleaseAgentControlTask(ctx, agentcontrol.TaskReleaseRequest{
+			ID:           request.ID,
+			Workflow:     agentcontrol.WorkflowSpawnTeam,
+			Status:       string(status),
+			Summary:      request.Summary,
+			FencingToken: request.FencingToken,
+		})
+	}
+	if status == TaskStatusBlocked || status == TaskStatusDone || status == TaskStatusFailed {
+		return nil, fmt.Errorf("%w: task status %s must use the dedicated lifecycle action", agentcontrol.ErrTaskLifecycleActionRequired, status)
+	}
+	if IsTerminalTaskStatus(current.Status) {
+		return nil, fmt.Errorf("terminal task status cannot be changed")
+	}
+	if status == TaskStatusReclaimPending {
+		if current.Status != TaskStatusRunning {
+			return nil, fmt.Errorf("only running tasks can enter reclaim_pending")
+		}
+		if err := taskFencingMatches(current, request.FencingToken); err != nil {
 			return nil, err
 		}
-		if request.Summary != "" {
-			if err := r.Store.UpdateTaskStatus(ctx, request.ID, status, request.Summary); err != nil {
-				return nil, err
-			}
+		fencedStore, ok := r.Store.(agentControlFencedTaskStore)
+		if !ok {
+			return nil, agentcontrol.ErrTaskFencingUnsupported
+		}
+		if err := fencedStore.UpdateTaskStatusWithFencing(ctx, request.ID, status, request.Summary, request.FencingToken); err != nil {
+			return nil, err
 		}
 	} else {
+		if status != current.Status {
+			return nil, fmt.Errorf("%w: task status transitions must use a dedicated lifecycle action", agentcontrol.ErrTaskLifecycleActionRequired)
+		}
+		if strings.TrimSpace(current.FencingToken) != "" {
+			return nil, agentcontrol.ErrTaskFencingUnsupported
+		}
 		if err := r.Store.UpdateTaskStatus(ctx, request.ID, status, request.Summary); err != nil {
 			return nil, err
 		}
@@ -1287,24 +1486,56 @@ func (r AgentControlTaskRegistry) ReleaseAgentControlTask(ctx context.Context, r
 	if !isAgentControlWritableTaskStatus(status) {
 		return nil, fmt.Errorf("unsupported task status: %s", request.Status)
 	}
-	if token := strings.TrimSpace(request.FencingToken); token != "" {
-		current, err := r.Store.GetTask(ctx, request.ID)
-		if err != nil {
-			return nil, err
-		}
-		if current == nil {
-			return nil, fmt.Errorf("task not found: %s", request.ID)
-		}
-		if strings.TrimSpace(current.FencingToken) != token {
+	switch status {
+	case TaskStatusPending, TaskStatusReady, TaskStatusReclaimPending, TaskStatusCancelled:
+	default:
+		return nil, fmt.Errorf("release cannot transition task to %s", status)
+	}
+	current, err := r.Store.GetTask(ctx, request.ID)
+	if err != nil {
+		return nil, err
+	}
+	if current == nil {
+		return nil, fmt.Errorf("task not found: %s", request.ID)
+	}
+	if IsTerminalTaskStatus(current.Status) {
+		return nil, fmt.Errorf("terminal task status cannot be changed")
+	}
+	if status == TaskStatusRunning {
+		return nil, fmt.Errorf("tasks cannot be released into running")
+	}
+	assignee := taskAssigneeID(*current)
+	token := strings.TrimSpace(request.FencingToken)
+	currentToken := strings.TrimSpace(current.FencingToken)
+	// Cancellation is an explicit control-plane revoke and may intentionally
+	// revoke an active claim without the executor token. Other release actions
+	// must identify the current attempt; blank only matches an unclaimed task.
+	if status != TaskStatusCancelled || token != "" {
+		if currentToken != token {
 			return nil, agentcontrol.ErrTaskFencingMismatch
 		}
 	}
-	if err := r.Store.ReleaseTask(ctx, request.ID, status); err != nil {
-		return nil, err
-	}
-	if request.Summary != "" {
-		if err := r.Store.UpdateTaskStatus(ctx, request.ID, status, request.Summary); err != nil {
+	fencedStore, hasFencedStore := r.Store.(agentControlFencedTaskStore)
+	if hasFencedStore {
+		if err := fencedStore.ReleaseTaskWithFencing(ctx, request.ID, status, request.Summary, token); err != nil {
 			return nil, err
+		}
+	} else {
+		if token != "" {
+			return nil, agentcontrol.ErrTaskFencingUnsupported
+		}
+		if err := r.Store.ReleaseTask(ctx, request.ID, status); err != nil {
+			return nil, err
+		}
+		if assignee != "" {
+			if err := r.Store.UpdateTeammateState(ctx, assignee, TeammateStateIdle); err != nil {
+				return nil, err
+			}
+		}
+		if request.Summary != "" {
+			if err := r.Store.UpdateTaskStatus(ctx, request.ID, status, request.Summary); err != nil {
+				return nil, err
+			}
 		}
 	}
 	task, err := r.Store.GetTask(ctx, request.ID)
@@ -1341,20 +1572,32 @@ func (r AgentControlTaskRegistry) RenewAgentControlTaskLease(ctx context.Context
 	if request.LeaseUntil.IsZero() {
 		return nil, fmt.Errorf("lease_until is required")
 	}
-	if token := strings.TrimSpace(request.FencingToken); token != "" {
-		current, err := r.Store.GetTask(ctx, request.ID)
-		if err != nil {
+	current, err := r.Store.GetTask(ctx, request.ID)
+	if err != nil {
+		return nil, err
+	}
+	if current == nil {
+		return nil, fmt.Errorf("task not found: %s", request.ID)
+	}
+	if current.Status != TaskStatusRunning && current.Status != TaskStatusReclaimPending {
+		return nil, fmt.Errorf("task lease can only be renewed while active")
+	}
+	token := strings.TrimSpace(request.FencingToken)
+	currentToken := strings.TrimSpace(current.FencingToken)
+	if currentToken != token {
+		return nil, agentcontrol.ErrTaskFencingMismatch
+	}
+	if fencedStore, ok := r.Store.(agentControlFencedTaskStore); ok {
+		if err := fencedStore.RenewTaskLeaseWithFencing(ctx, request.ID, request.LeaseUntil, token); err != nil {
 			return nil, err
 		}
-		if current == nil {
-			return nil, fmt.Errorf("task not found: %s", request.ID)
+	} else {
+		if currentToken != "" {
+			return nil, agentcontrol.ErrTaskFencingUnsupported
 		}
-		if strings.TrimSpace(current.FencingToken) != token {
-			return nil, agentcontrol.ErrTaskFencingMismatch
+		if err := r.Store.RenewTaskLease(ctx, request.ID, request.LeaseUntil); err != nil {
+			return nil, err
 		}
-	}
-	if err := r.Store.RenewTaskLease(ctx, request.ID, request.LeaseUntil); err != nil {
-		return nil, err
 	}
 	task, err := r.Store.GetTask(ctx, request.ID)
 	if err != nil {
@@ -1391,18 +1634,57 @@ func (r AgentControlTaskRegistry) RetryAgentControlTask(ctx context.Context, req
 		return nil, fmt.Errorf("task status is required")
 	}
 	status := TaskStatus(request.Status)
-	if !isAgentControlWritableTaskStatus(status) {
-		return nil, fmt.Errorf("unsupported task status: %s", request.Status)
+	switch status {
+	case TaskStatusPending, TaskStatusReady, TaskStatusReclaimPending:
+	default:
+		return nil, fmt.Errorf("retry cannot transition task to %s", status)
 	}
-	if err := r.Store.IncrementTaskRetry(ctx, request.ID); err != nil {
+	current, err := r.Store.GetTask(ctx, request.ID)
+	if err != nil {
 		return nil, err
 	}
-	if err := r.Store.ReleaseTask(ctx, request.ID, status); err != nil {
-		return nil, err
+	if current == nil {
+		return nil, fmt.Errorf("task not found: %s", request.ID)
 	}
-	if request.Summary != "" {
-		if err := r.Store.UpdateTaskStatus(ctx, request.ID, status, request.Summary); err != nil {
+	if request.ExpectedVersion > 0 && current.Version != request.ExpectedVersion {
+		return nil, agentcontrol.ErrTaskVersionConflict
+	}
+	if IsTerminalTaskStatus(current.Status) {
+		return nil, fmt.Errorf("terminal task status cannot be changed")
+	}
+	assignee := taskAssigneeID(*current)
+	token := strings.TrimSpace(request.FencingToken)
+	currentToken := strings.TrimSpace(current.FencingToken)
+	if currentToken != token {
+		return nil, agentcontrol.ErrTaskFencingMismatch
+	}
+	fencedStore, hasFencedStore := r.Store.(agentControlFencedTaskStore)
+	if hasFencedStore {
+		if err := fencedStore.RetryTaskWithFencing(ctx, request.ID, status, request.Summary, token, request.ExpectedVersion); err != nil {
 			return nil, err
+		}
+	} else {
+		if request.ExpectedVersion > 0 {
+			return nil, agentcontrol.ErrTaskVersionUnsupported
+		}
+		if currentToken != "" {
+			return nil, agentcontrol.ErrTaskFencingUnsupported
+		}
+		if err := r.Store.IncrementTaskRetry(ctx, request.ID); err != nil {
+			return nil, err
+		}
+		if err := r.Store.ReleaseTask(ctx, request.ID, status); err != nil {
+			return nil, err
+		}
+		if request.Summary != "" {
+			if err := r.Store.UpdateTaskStatus(ctx, request.ID, status, request.Summary); err != nil {
+				return nil, err
+			}
+		}
+		if assignee != "" {
+			if err := r.Store.UpdateTeammateState(ctx, assignee, TeammateStateIdle); err != nil {
+				return nil, err
+			}
 		}
 	}
 	task, err := r.Store.GetTask(ctx, request.ID)

@@ -64,6 +64,34 @@ func (s *notifyingClaimStore) ClaimTask(ctx context.Context, id string, assignee
 	return claimed, err
 }
 
+func (s *notifyingClaimStore) ClaimTaskWithOwnerFence(ctx context.Context, id string, assignee string, leaseUntil time.Time, expectedVersion int64, ownerID, ownerToken string) (bool, error) {
+	claimer, ok := s.Store.(agentControlOwnerFencedTaskClaimer)
+	if !ok {
+		return false, agentcontrol.ErrTaskFencingUnsupported
+	}
+	claimed, err := claimer.ClaimTaskWithOwnerFence(ctx, id, assignee, leaseUntil, expectedVersion, ownerID, ownerToken)
+	if claimed {
+		s.once.Do(func() {
+			close(s.claimed)
+		})
+	}
+	return claimed, err
+}
+
+func (s *notifyingClaimStore) ClaimTaskWithPathClaimsAndOwnerFence(ctx context.Context, task Task, assignee string, leaseUntil time.Time, workspaceRoot, ownerID, ownerToken string) (bool, error) {
+	claimer, ok := s.Store.(agentControlOwnerFencedTaskClaimer)
+	if !ok {
+		return false, agentcontrol.ErrTaskFencingUnsupported
+	}
+	claimed, err := claimer.ClaimTaskWithPathClaimsAndOwnerFence(ctx, task, assignee, leaseUntil, workspaceRoot, ownerID, ownerToken)
+	if claimed {
+		s.once.Do(func() {
+			close(s.claimed)
+		})
+	}
+	return claimed, err
+}
+
 func (s *notifyingClaimStore) WatchMail(ctx context.Context, teamID string) (<-chan MailMessage, func()) {
 	if watcher, ok := s.Store.(MailWatcherStore); ok {
 		return watcher.WatchMail(ctx, teamID)
@@ -174,9 +202,9 @@ func TestOrchestratorClaimReadyTasksHonorsMaxWriters(t *testing.T) {
 	teamID, err := store.CreateTeam(ctx, Team{MaxWriters: 1})
 	require.NoError(t, err)
 
-	_, err = store.UpsertTeammate(ctx, Teammate{ID: "mate-a", TeamID: teamID, State: TeammateStateIdle})
+	_, err = store.UpsertTeammate(ctx, Teammate{ID: "mate-a", TeamID: teamID, SessionID: "session-mate-a", State: TeammateStateIdle})
 	require.NoError(t, err)
-	_, err = store.UpsertTeammate(ctx, Teammate{ID: "mate-b", TeamID: teamID, State: TeammateStateIdle})
+	_, err = store.UpsertTeammate(ctx, Teammate{ID: "mate-b", TeamID: teamID, SessionID: "session-mate-b", State: TeammateStateIdle})
 	require.NoError(t, err)
 
 	_, err = store.CreateTask(ctx, Task{
@@ -281,9 +309,9 @@ func TestOrchestratorClaimReadyTasksHonorsExpertConcurrencyLimit(t *testing.T) {
 
 	_, err = store.UpsertTeammate(ctx, Teammate{ID: "mate-active", TeamID: teamID, State: TeammateStateBusy})
 	require.NoError(t, err)
-	_, err = store.UpsertTeammate(ctx, Teammate{ID: "mate-a", TeamID: teamID, State: TeammateStateIdle})
+	_, err = store.UpsertTeammate(ctx, Teammate{ID: "mate-a", TeamID: teamID, SessionID: "session-mate-a", State: TeammateStateIdle})
 	require.NoError(t, err)
-	_, err = store.UpsertTeammate(ctx, Teammate{ID: "mate-b", TeamID: teamID, State: TeammateStateIdle})
+	_, err = store.UpsertTeammate(ctx, Teammate{ID: "mate-b", TeamID: teamID, SessionID: "session-mate-b", State: TeammateStateIdle})
 	require.NoError(t, err)
 
 	activeAssignee := "mate-active"
@@ -345,9 +373,9 @@ func TestOrchestratorClaimReadyTasksRespectsPinnedAssignee(t *testing.T) {
 	teamID, err := store.CreateTeam(ctx, Team{})
 	require.NoError(t, err)
 
-	_, err = store.UpsertTeammate(ctx, Teammate{ID: "mate-a", TeamID: teamID, State: TeammateStateIdle})
+	_, err = store.UpsertTeammate(ctx, Teammate{ID: "mate-a", TeamID: teamID, SessionID: "session-mate-a", State: TeammateStateIdle})
 	require.NoError(t, err)
-	_, err = store.UpsertTeammate(ctx, Teammate{ID: "mate-b", TeamID: teamID, State: TeammateStateIdle})
+	_, err = store.UpsertTeammate(ctx, Teammate{ID: "mate-b", TeamID: teamID, SessionID: "session-mate-b", State: TeammateStateIdle})
 	require.NoError(t, err)
 
 	assignee := "mate-b"
@@ -379,7 +407,7 @@ func TestOrchestratorClaimReadyTasksWithClaimsCreatesPathClaim(t *testing.T) {
 	teamID, err := store.CreateTeam(ctx, Team{})
 	require.NoError(t, err)
 
-	_, err = store.UpsertTeammate(ctx, Teammate{ID: "mate-a", TeamID: teamID, State: TeammateStateIdle})
+	_, err = store.UpsertTeammate(ctx, Teammate{ID: "mate-a", TeamID: teamID, SessionID: "session-mate-a", State: TeammateStateIdle})
 	require.NoError(t, err)
 
 	taskID, err := store.CreateTask(ctx, Task{
@@ -427,13 +455,46 @@ func TestOrchestratorRunStopsWhenTeamNotActive(t *testing.T) {
 	require.NoError(t, orchestrator.Run(ctx, teamID))
 }
 
+func TestOrchestratorClaimReadyTasksDoesNotClaimForInactiveTeam(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	teamID, err := store.CreateTeam(ctx, Team{Status: TeamStatusPaused})
+	require.NoError(t, err)
+	_, err = store.UpsertTeammate(ctx, Teammate{
+		ID:        "mate-paused",
+		TeamID:    teamID,
+		SessionID: "session-paused",
+		State:     TeammateStateIdle,
+	})
+	require.NoError(t, err)
+	taskID, err := store.CreateTask(ctx, Task{
+		TeamID: teamID,
+		Title:  "must remain queued",
+		Status: TaskStatusPending,
+	})
+	require.NoError(t, err)
+
+	assignments, err := NewOrchestrator(store, nil, nil).ClaimReadyTasks(ctx, teamID, 0)
+	require.NoError(t, err)
+	require.Empty(t, assignments)
+
+	task, err := store.GetTask(ctx, taskID)
+	require.NoError(t, err)
+	require.NotNil(t, task)
+	require.Equal(t, TaskStatusPending, task.Status)
+	mate, err := store.GetTeammate(ctx, "mate-paused")
+	require.NoError(t, err)
+	require.NotNil(t, mate)
+	require.Equal(t, TeammateStateIdle, mate.State)
+}
+
 func TestOrchestratorRunTicksImmediately(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)
 	teamID, err := store.CreateTeam(ctx, Team{})
 	require.NoError(t, err)
 
-	_, err = store.UpsertTeammate(ctx, Teammate{ID: "mate-a", TeamID: teamID, State: TeammateStateIdle})
+	_, err = store.UpsertTeammate(ctx, Teammate{ID: "mate-a", TeamID: teamID, SessionID: "session-mate-a", State: TeammateStateIdle})
 	require.NoError(t, err)
 	_, err = store.CreateTask(ctx, Task{
 		TeamID: teamID,
@@ -476,7 +537,7 @@ func TestOrchestratorRunWithWakeProcessesReadyTaskBeforeFallbackTick(t *testing.
 	teamID, err := store.CreateTeam(ctx, Team{})
 	require.NoError(t, err)
 
-	_, err = store.UpsertTeammate(ctx, Teammate{ID: "mate-a", TeamID: teamID, State: TeammateStateIdle})
+	_, err = store.UpsertTeammate(ctx, Teammate{ID: "mate-a", TeamID: teamID, SessionID: "session-mate-a", State: TeammateStateIdle})
 	require.NoError(t, err)
 	_, err = store.UpsertTeammate(ctx, Teammate{ID: "mate-b", TeamID: teamID, State: TeammateStateBusy})
 	require.NoError(t, err)
@@ -533,7 +594,7 @@ func TestOrchestratorRunWakesFromMailboxSequenceBeforeFallbackTick(t *testing.T)
 	teamID, err := store.CreateTeam(ctx, Team{})
 	require.NoError(t, err)
 
-	_, err = store.UpsertTeammate(ctx, Teammate{ID: "mate-a", TeamID: teamID, State: TeammateStateIdle})
+	_, err = store.UpsertTeammate(ctx, Teammate{ID: "mate-a", TeamID: teamID, SessionID: "session-mate-a", State: TeammateStateIdle})
 	require.NoError(t, err)
 	_, err = store.UpsertTeammate(ctx, Teammate{ID: "mate-b", TeamID: teamID, State: TeammateStateBusy})
 	require.NoError(t, err)
@@ -596,7 +657,7 @@ func TestOrchestratorRunUsesAgentControlMailboxWakeSourceBeforeFallbackTick(t *t
 	teamID, err := store.CreateTeam(ctx, Team{})
 	require.NoError(t, err)
 
-	_, err = store.UpsertTeammate(ctx, Teammate{ID: "mate-a", TeamID: teamID, State: TeammateStateIdle})
+	_, err = store.UpsertTeammate(ctx, Teammate{ID: "mate-a", TeamID: teamID, SessionID: "session-mate-a", State: TeammateStateIdle})
 	require.NoError(t, err)
 	_, err = store.UpsertTeammate(ctx, Teammate{ID: "mate-b", TeamID: teamID, State: TeammateStateBusy})
 	require.NoError(t, err)
@@ -661,7 +722,7 @@ func TestOrchestratorRunUsesGlobalMailboxWakeBeforeFallbackTick(t *testing.T) {
 	teamID, err := store.CreateTeam(ctx, Team{})
 	require.NoError(t, err)
 
-	_, err = store.UpsertTeammate(ctx, Teammate{ID: "mate-a", TeamID: teamID, State: TeammateStateIdle})
+	_, err = store.UpsertTeammate(ctx, Teammate{ID: "mate-a", TeamID: teamID, SessionID: "session-mate-a", State: TeammateStateIdle})
 	require.NoError(t, err)
 	_, err = store.UpsertTeammate(ctx, Teammate{ID: "mate-b", TeamID: teamID, State: TeammateStateBusy})
 	require.NoError(t, err)
@@ -725,7 +786,7 @@ func TestOrchestratorRunWakesFromTaskSignalBeforeFallbackTick(t *testing.T) {
 	teamID, err := store.CreateTeam(ctx, Team{})
 	require.NoError(t, err)
 
-	_, err = store.UpsertTeammate(ctx, Teammate{ID: "mate-a", TeamID: teamID, State: TeammateStateIdle})
+	_, err = store.UpsertTeammate(ctx, Teammate{ID: "mate-a", TeamID: teamID, SessionID: "session-mate-a", State: TeammateStateIdle})
 	require.NoError(t, err)
 	_, err = store.UpsertTeammate(ctx, Teammate{ID: "mate-b", TeamID: teamID, State: TeammateStateBusy})
 	require.NoError(t, err)
@@ -780,7 +841,7 @@ func TestOrchestratorRunUsesAgentControlTaskWakeSourceBeforeFallbackTick(t *test
 	teamID, err := store.CreateTeam(ctx, Team{})
 	require.NoError(t, err)
 
-	_, err = store.UpsertTeammate(ctx, Teammate{ID: "mate-a", TeamID: teamID, State: TeammateStateIdle})
+	_, err = store.UpsertTeammate(ctx, Teammate{ID: "mate-a", TeamID: teamID, SessionID: "session-mate-a", State: TeammateStateIdle})
 	require.NoError(t, err)
 	_, err = store.UpsertTeammate(ctx, Teammate{ID: "mate-b", TeamID: teamID, State: TeammateStateBusy})
 	require.NoError(t, err)
@@ -847,10 +908,12 @@ func TestOrchestratorExecuteAssignmentBlocksTaskAndReplans(t *testing.T) {
 		State:     TeammateStateBusy,
 	})
 	require.NoError(t, err)
+	assignee := "mate-1"
 	taskID, err := store.CreateTask(ctx, Task{
-		TeamID: teamID,
-		Title:  "blocked task",
-		Status: TaskStatusRunning,
+		TeamID:   teamID,
+		Title:    "blocked task",
+		Status:   TaskStatusRunning,
+		Assignee: &assignee,
 	})
 	require.NoError(t, err)
 
@@ -917,6 +980,7 @@ func TestOrchestratorBlockedReplanFollowupClaimsDifferentIdleTeammate(t *testing
 		State:     TeammateStateBusy,
 	})
 	require.NoError(t, err)
+	assignee := "mate-1"
 	_, err = store.UpsertTeammate(ctx, Teammate{
 		ID:        "mate-2",
 		TeamID:    teamID,
@@ -925,9 +989,10 @@ func TestOrchestratorBlockedReplanFollowupClaimsDifferentIdleTeammate(t *testing
 	})
 	require.NoError(t, err)
 	taskID, err := store.CreateTask(ctx, Task{
-		TeamID: teamID,
-		Title:  "blocked task",
-		Status: TaskStatusRunning,
+		TeamID:   teamID,
+		Title:    "blocked task",
+		Status:   TaskStatusRunning,
+		Assignee: &assignee,
 	})
 	require.NoError(t, err)
 
@@ -1008,10 +1073,12 @@ func TestOrchestratorExecuteAssignmentFailsProtocolErrorOutput(t *testing.T) {
 		State:     TeammateStateBusy,
 	})
 	require.NoError(t, err)
+	assignee := "mate-1"
 	taskID, err := store.CreateTask(ctx, Task{
-		TeamID: teamID,
-		Title:  "protocol task",
-		Status: TaskStatusRunning,
+		TeamID:   teamID,
+		Title:    "protocol task",
+		Status:   TaskStatusRunning,
+		Assignee: &assignee,
 	})
 	require.NoError(t, err)
 
@@ -1236,10 +1303,12 @@ func TestOrchestratorExecuteAssignmentMarksTeamDoneWhenLastTaskCompletes(t *test
 		State:     TeammateStateBusy,
 	})
 	require.NoError(t, err)
+	assignee := "mate-1"
 	taskID, err := store.CreateTask(ctx, Task{
-		TeamID: teamID,
-		Title:  "final task",
-		Status: TaskStatusRunning,
+		TeamID:   teamID,
+		Title:    "final task",
+		Status:   TaskStatusRunning,
+		Assignee: &assignee,
 	})
 	require.NoError(t, err)
 
@@ -1312,10 +1381,12 @@ func TestOrchestratorExecuteAssignmentSendsLeadProgressMailbox(t *testing.T) {
 		State:     TeammateStateBusy,
 	})
 	require.NoError(t, err)
+	assignee := "mate-1"
 	taskID, err := store.CreateTask(ctx, Task{
-		TeamID: teamID,
-		Title:  "final task",
-		Status: TaskStatusRunning,
+		TeamID:   teamID,
+		Title:    "final task",
+		Status:   TaskStatusRunning,
+		Assignee: &assignee,
 	})
 	require.NoError(t, err)
 

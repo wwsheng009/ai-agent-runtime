@@ -13,4 +13,4 @@ export type RuntimeTeamsProps = {
   teams: RuntimeTeamRecord[];
 };
 
-export type RuntimeTeamsView = "teams" | "dispatch";
+export type RuntimeTeamsView = "teams" | "runs" | "dispatch";

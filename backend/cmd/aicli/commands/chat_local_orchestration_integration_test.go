@@ -477,9 +477,11 @@ func TestAICLIChatActorExecutor_InteractiveAutoStartRendersTeamTimeline(t *testi
 			copy(cloned, lines)
 			return cloned
 		}()
+		// Task completion is asserted through the durable Team lifecycle event.
+		// The teammate's terminal mailbox is addressed to that teammate session,
+		// so it is not a required duplicate row in the parent timeline.
 		if containsAllChatTimelineLines(snapshot,
 			"[progress] planner -> lead task-auto Started task: Auto task",
-			"[done] planner -> lead task-auto auto smoke finished",
 			"[task] completed task-auto @planner auto smoke finished",
 			"[team] completed team-auto status=done",
 			"[team summary] team-auto auto lead summary",

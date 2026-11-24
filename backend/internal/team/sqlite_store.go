@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -56,6 +57,8 @@ type SQLiteStore struct {
 	nextAgentControlTaskSignalWatchID int64
 	agentControlTaskSignalWatchers    map[int64]taskSignalWatcher
 }
+
+var _ atomicTaskPlanStore = (*SQLiteStore)(nil)
 
 // SetGlobalMailboxWriter configures an optional write-through target for the
 // durable cross-workflow AgentControl mailbox registry.
@@ -738,6 +741,259 @@ func (s *SQLiteStore) CreateAgentControlTaskRecord(ctx context.Context, task Tas
 	return task.ID, nil
 }
 
+func validateTaskPlanDependencies(dependencies []TaskDependency) error {
+	dependenciesByTask := make(map[string][]string, len(dependencies))
+	for _, dependency := range dependencies {
+		taskID := strings.TrimSpace(dependency.TaskID)
+		dependsOnID := strings.TrimSpace(dependency.DependsOnID)
+		if taskID == dependsOnID {
+			return fmt.Errorf("task plan dependency cycle: %s depends on itself", taskID)
+		}
+		dependenciesByTask[taskID] = append(dependenciesByTask[taskID], dependsOnID)
+	}
+
+	// Edges point from a task to its prerequisites. A back-edge in this
+	// depth-first traversal means the generated plan cannot become runnable.
+	state := make(map[string]uint8, len(dependenciesByTask))
+	var visit func(string) bool
+	visit = func(taskID string) bool {
+		switch state[taskID] {
+		case 1:
+			return false
+		case 2:
+			return true
+		}
+		state[taskID] = 1
+		for _, dependsOnID := range dependenciesByTask[taskID] {
+			if !visit(dependsOnID) {
+				return false
+			}
+		}
+		state[taskID] = 2
+		return true
+	}
+	for taskID := range dependenciesByTask {
+		if !visit(taskID) {
+			return fmt.Errorf("task plan dependency cycle detected")
+		}
+	}
+	return nil
+}
+
+// PersistTaskPlanWithVersion materializes a replan in one SQLite transaction.
+// The failed task version is advanced as part of the same transaction, which
+// makes the reviewed failure snapshot a single-use fence: a concurrent or
+// repeated replan using the same version cannot create another plan.
+func (s *SQLiteStore) PersistTaskPlanWithVersion(
+	ctx context.Context,
+	failedTaskID string,
+	expectedVersion int64,
+	tasks []Task,
+	dependencies []TaskDependency,
+) error {
+	if s == nil {
+		return fmt.Errorf("team store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return err
+	}
+	failedTaskID = strings.TrimSpace(failedTaskID)
+	if failedTaskID == "" {
+		return fmt.Errorf("failed task id is required")
+	}
+	if expectedVersion <= 0 {
+		return fmt.Errorf("expected task version is required")
+	}
+	if len(tasks) == 0 {
+		return fmt.Errorf("plan tasks are required")
+	}
+
+	// Normalize and validate the plan before opening the write transaction.
+	// In particular, all plan rows must belong to the same team; the transaction
+	// below then verifies that team against the failed task row.
+	teamID := strings.TrimSpace(tasks[0].TeamID)
+	if teamID == "" {
+		return fmt.Errorf("plan task team id is required")
+	}
+	normalizedTasks := make([]Task, len(tasks))
+	records := make([]agentcontrol.TaskRecord, len(tasks))
+	planIDs := make(map[string]struct{}, len(tasks))
+	for i := range tasks {
+		task := tasks[i]
+		task.ID = strings.TrimSpace(task.ID)
+		task.TeamID = strings.TrimSpace(task.TeamID)
+		if task.ID == "" {
+			return fmt.Errorf("plan task id is required at index %d", i)
+		}
+		if task.TeamID == "" {
+			return fmt.Errorf("plan task team id is required for %s", task.ID)
+		}
+		if !strings.EqualFold(task.TeamID, teamID) {
+			return fmt.Errorf("plan task %s does not belong to team: %s", task.ID, teamID)
+		}
+		if _, exists := planIDs[task.ID]; exists {
+			return fmt.Errorf("duplicate plan task id: %s", task.ID)
+		}
+		planIDs[task.ID] = struct{}{}
+
+		difficulty, ok := NormalizeTaskDifficulty(task.Difficulty)
+		if !ok {
+			return fmt.Errorf("invalid task difficulty: %s", strings.TrimSpace(task.Difficulty))
+		}
+		task.Difficulty = difficulty
+		if task.Status == "" {
+			task.Status = TaskStatusPending
+		}
+		if task.Status != TaskStatusPending {
+			return fmt.Errorf("replan task %s must start pending, got %s", task.ID, task.Status)
+		}
+		if !isAgentControlWritableTaskStatus(task.Status) {
+			return fmt.Errorf("unsupported task status: %s", task.Status)
+		}
+		// Execution state is owned by the Runtime, never by the generated plan.
+		task.Version = 1
+		task.Attempt = 0
+		task.RetryCount = 0
+		task.FencingToken = ""
+		task.LeaseUntil = nil
+		now := time.Now().UTC()
+		if task.CreatedAt.IsZero() {
+			task.CreatedAt = now
+		}
+		if task.UpdatedAt.IsZero() {
+			task.UpdatedAt = now
+		}
+		var mate *Teammate
+		if assignee := taskAssigneeID(task); assignee != "" {
+			var err error
+			mate, err = s.GetTeammate(ctx, assignee)
+			if err != nil {
+				return err
+			}
+			if mate == nil {
+				return fmt.Errorf("plan task %s has unknown assignee: %s", task.ID, assignee)
+			}
+			if !strings.EqualFold(strings.TrimSpace(mate.TeamID), task.TeamID) {
+				return fmt.Errorf("plan task %s assignee does not belong to team: %s", task.ID, assignee)
+			}
+		}
+		normalizedTasks[i] = task
+		records[i] = AgentControlTaskRecord(task, mate)
+	}
+
+	normalizedDependencies := make([]TaskDependency, len(dependencies))
+	for i := range dependencies {
+		dependency := dependencies[i]
+		dependency.TaskID = strings.TrimSpace(dependency.TaskID)
+		dependency.DependsOnID = strings.TrimSpace(dependency.DependsOnID)
+		if dependency.TaskID == "" || dependency.DependsOnID == "" {
+			return fmt.Errorf("task dependency ids are required")
+		}
+		if _, ok := planIDs[dependency.TaskID]; !ok {
+			return fmt.Errorf("plan dependency task not found: %s", dependency.TaskID)
+		}
+		if _, ok := planIDs[dependency.DependsOnID]; !ok {
+			return fmt.Errorf("plan dependency task not found: %s", dependency.DependsOnID)
+		}
+		normalizedDependencies[i] = dependency
+	}
+	if err := validateTaskPlanDependencies(normalizedDependencies); err != nil {
+		return err
+	}
+
+	wakeEvents := make([]agentcontrol.WakeEvent, 0, len(normalizedDependencies))
+	if err := s.WithImmediateTx(ctx, func(tx *sql.Tx) error {
+		var (
+			failedTeamID   string
+			currentVersion int64
+		)
+		err := tx.QueryRowContext(ctx, `
+			SELECT team_id, version
+			FROM agent_control_task_records
+			WHERE workflow = ? AND task_id = ?
+		`, agentcontrol.WorkflowSpawnTeam, failedTaskID).Scan(&failedTeamID, &currentVersion)
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("failed task not found: %s", failedTaskID)
+		}
+		if err != nil {
+			return fmt.Errorf("load failed task for replan: %w", err)
+		}
+		if !strings.EqualFold(strings.TrimSpace(failedTeamID), teamID) {
+			return fmt.Errorf("failed task does not belong to team: %s", failedTaskID)
+		}
+		if currentVersion != expectedVersion {
+			return fmt.Errorf("%w: expected %d, current %d", agentcontrol.ErrTaskVersionConflict, expectedVersion, currentVersion)
+		}
+
+		// Advance the fence before inserting any plan rows. Any subsequent
+		// insertion failure rolls the version advance back together with the
+		// plan, preserving all-or-nothing semantics.
+		now := time.Now().UTC()
+		result, err := tx.ExecContext(ctx, `
+			UPDATE agent_control_task_records
+			SET version = version + 1, updated_at = ?
+			WHERE workflow = ? AND task_id = ? AND team_id = ? AND version = ?
+		`, formatTime(now), agentcontrol.WorkflowSpawnTeam, failedTaskID, teamID, expectedVersion)
+		if err != nil {
+			return fmt.Errorf("fence failed task for replan: %w", err)
+		}
+		affected, _ := result.RowsAffected()
+		if affected != 1 {
+			return fmt.Errorf("%w: expected %d", agentcontrol.ErrTaskVersionConflict, expectedVersion)
+		}
+
+		for i, task := range normalizedTasks {
+			if err := s.insertAgentControlTaskRecordTx(ctx, tx, task, records[i], false); err != nil {
+				return fmt.Errorf("persist replan task %s: %w", task.ID, err)
+			}
+		}
+		for _, dependency := range normalizedDependencies {
+			dependencyID := "dep_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+			createdAt := time.Now().UTC()
+			result, err := tx.ExecContext(ctx, `
+				INSERT INTO agent_control_task_dependencies (
+					workflow, dependency_id, team_id, task_id, depends_on_id, created_at
+				) VALUES (?, ?, ?, ?, ?, ?)
+				ON CONFLICT(workflow, task_id, depends_on_id) DO NOTHING
+			`, agentcontrol.WorkflowSpawnTeam, dependencyID, teamID, dependency.TaskID, dependency.DependsOnID, formatTime(createdAt))
+			if err != nil {
+				return fmt.Errorf("persist replan dependency %s -> %s: %w", dependency.TaskID, dependency.DependsOnID, err)
+			}
+			affected, err := result.RowsAffected()
+			if err != nil {
+				return fmt.Errorf("check persisted replan dependency %s -> %s: %w", dependency.TaskID, dependency.DependsOnID, err)
+			}
+			if affected == 0 {
+				continue
+			}
+
+			payload := map[string]interface{}{
+				"dependency_id": dependencyID,
+				"task_id":       dependency.TaskID,
+				"depends_on_id": dependency.DependsOnID,
+				"team_id":       teamID,
+			}
+			_, wake, err := appendTeamRunEventTx(ctx, tx, TeamEvent{
+				Type:      TaskDependencyCreatedEvent,
+				TeamID:    teamID,
+				Payload:   payload,
+				Timestamp: createdAt,
+			})
+			if err != nil {
+				return fmt.Errorf("persist replan dependency event: %w", err)
+			}
+			wakeEvents = append(wakeEvents, wake)
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("persist task plan with version: %w", err)
+	}
+	for _, wake := range wakeEvents {
+		s.notifyAgentControlWakeWatchers(wake)
+	}
+	return nil
+}
+
 // GetTask loads a task by id.
 func (s *SQLiteStore) GetTask(ctx context.Context, id string) (*Task, error) {
 	if s == nil {
@@ -947,6 +1203,25 @@ func (s *SQLiteStore) UpdateAgentControlTaskRecord(ctx context.Context, task Tas
 		return err
 	}
 	if err := s.WithImmediateTx(ctx, func(tx *sql.Tx) error {
+		var currentStatus string
+		var currentFencingToken string
+		loadErr := tx.QueryRowContext(ctx, `
+			SELECT status, fencing_token
+			FROM agent_control_task_records
+			WHERE workflow = ? AND task_id = ?
+		`, agentcontrol.WorkflowSpawnTeam, task.ID).Scan(&currentStatus, &currentFencingToken)
+		if loadErr != nil && loadErr != sql.ErrNoRows {
+			return fmt.Errorf("load task before update: %w", loadErr)
+		}
+		if loadErr == nil {
+			current := TaskStatus(currentStatus)
+			if task.Status != current {
+				return fmt.Errorf("%w: task status transitions must use a dedicated lifecycle action", agentcontrol.ErrTaskLifecycleActionRequired)
+			}
+			if current == TaskStatusRunning || strings.TrimSpace(currentFencingToken) != "" {
+				return fmt.Errorf("%w: claimed or running tasks must use a controlled lifecycle action", agentcontrol.ErrTaskLifecycleActionRequired)
+			}
+		}
 		return s.insertAgentControlTaskRecordTx(ctx, tx, task, record, true)
 	}); err != nil {
 		return err
@@ -992,6 +1267,375 @@ func (s *SQLiteStore) UpdateTaskStatus(ctx context.Context, id string, status Ta
 		_ = s.appendTaskSignalForTask(ctx, id, TaskSignalTaskStatus, status)
 	}
 	return nil
+}
+
+// UpdateTaskStatusWithFencing performs the lease-reclaim status transition
+// while holding the task's claim token in the SQL predicate. The token remains
+// attached to the task during reclaim_pending so the current runner can still
+// renew its lease during the grace window.
+func (s *SQLiteStore) UpdateTaskStatusWithFencing(ctx context.Context, id string, status TaskStatus, summary, fencingToken string) error {
+	if s == nil {
+		return fmt.Errorf("team store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return err
+	}
+	id = strings.TrimSpace(id)
+	fencingToken = strings.TrimSpace(fencingToken)
+	if id == "" {
+		return fmt.Errorf("task id is required")
+	}
+	if status != TaskStatusReclaimPending {
+		return fmt.Errorf("fenced task status update only supports reclaim_pending")
+	}
+	now := time.Now().UTC()
+	changed := false
+	if err := s.WithImmediateTx(ctx, func(tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx, `
+			UPDATE agent_control_task_records
+			SET status = ?, summary = ?, updated_at = ?
+			WHERE workflow = ? AND task_id = ? AND status = ? AND fencing_token = ?
+		`, string(status), summary, formatTime(now), agentcontrol.WorkflowSpawnTeam, id, string(TaskStatusRunning), fencingToken)
+		if err != nil {
+			return fmt.Errorf("update fenced agent control task status: %w", err)
+		}
+		affected, _ := result.RowsAffected()
+		changed = affected > 0
+		return nil
+	}); err != nil {
+		return err
+	}
+	if !changed {
+		return s.fencedTaskMutationFailure(ctx, id, fencingToken, "status update")
+	}
+	_ = s.appendTaskSignalForTask(ctx, id, TaskSignalTaskStatus, status)
+	return nil
+}
+
+// RenewTaskLeaseWithFencing extends a task lease only for the current claim
+// attempt. reclaim_pending is accepted because the reclaim grace window still
+// belongs to the attempt that held the expired lease.
+func (s *SQLiteStore) RenewTaskLeaseWithFencing(ctx context.Context, id string, leaseUntil time.Time, fencingToken string) error {
+	if s == nil {
+		return fmt.Errorf("team store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return err
+	}
+	id = strings.TrimSpace(id)
+	fencingToken = strings.TrimSpace(fencingToken)
+	if id == "" {
+		return fmt.Errorf("task id is required")
+	}
+	if leaseUntil.IsZero() {
+		return fmt.Errorf("lease_until is required")
+	}
+	now := time.Now().UTC()
+	changed := false
+	if err := s.WithImmediateTx(ctx, func(tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx, `
+			UPDATE agent_control_task_records
+			SET lease_until = ?, updated_at = ?
+			WHERE workflow = ? AND task_id = ?
+			  AND status IN (?, ?) AND fencing_token = ?
+		`, formatTime(leaseUntil), formatTime(now), agentcontrol.WorkflowSpawnTeam, id,
+			string(TaskStatusRunning), string(TaskStatusReclaimPending), fencingToken)
+		if err != nil {
+			return fmt.Errorf("renew fenced agent control task lease: %w", err)
+		}
+		affected, _ := result.RowsAffected()
+		changed = affected > 0
+		return nil
+	}); err != nil {
+		return err
+	}
+	if !changed {
+		return s.fencedTaskMutationFailure(ctx, id, fencingToken, "lease renewal")
+	}
+	_ = s.appendTaskSignalForTask(ctx, id, TaskSignalTaskLeaseRenewed, TaskStatusRunning)
+	return nil
+}
+
+// ReleaseTaskWithFencing atomically releases a task claim. A non-empty token
+// is an executor-fenced release. Empty tokens only match unclaimed tasks,
+// except cancellation, which is an explicit control-plane revoke and may
+// intentionally revoke an active claim.
+func (s *SQLiteStore) ReleaseTaskWithFencing(ctx context.Context, id string, status TaskStatus, summary, fencingToken string) error {
+	if s == nil {
+		return fmt.Errorf("team store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return err
+	}
+	id = strings.TrimSpace(id)
+	fencingToken = strings.TrimSpace(fencingToken)
+	if id == "" {
+		return fmt.Errorf("task id is required")
+	}
+	switch status {
+	case TaskStatusPending, TaskStatusReady, TaskStatusReclaimPending, TaskStatusCancelled:
+	default:
+		return fmt.Errorf("release cannot transition task to %s", status)
+	}
+	now := time.Now().UTC()
+	changed := false
+	if err := s.WithImmediateTx(ctx, func(tx *sql.Tx) error {
+		var assignee sql.NullString
+		if err := tx.QueryRowContext(ctx, `
+			SELECT assignee
+			FROM agent_control_task_records
+			WHERE workflow = ? AND task_id = ?
+		`, agentcontrol.WorkflowSpawnTeam, id).Scan(&assignee); err != nil {
+			if err == sql.ErrNoRows {
+				return fmt.Errorf("task not found: %s", id)
+			}
+			return fmt.Errorf("load task before fenced release: %w", err)
+		}
+		query := `
+			UPDATE agent_control_task_records
+			SET status = ?,
+				summary = CASE WHEN ? <> '' THEN ? ELSE summary END,
+				assignee = NULL, session_id = NULL, agent_path = NULL,
+				lease_until = NULL, fencing_token = '', updated_at = ?
+			WHERE workflow = ? AND task_id = ?
+			  AND status NOT IN (?, ?, ?)
+		`
+		args := []interface{}{
+			string(status), summary, summary, formatTime(now),
+			agentcontrol.WorkflowSpawnTeam, id,
+			string(TaskStatusDone), string(TaskStatusFailed), string(TaskStatusCancelled),
+		}
+		if fencingToken != "" || status != TaskStatusCancelled {
+			query += " AND fencing_token = ?"
+			args = append(args, fencingToken)
+		}
+		result, err := tx.ExecContext(ctx, query, args...)
+		if err != nil {
+			return fmt.Errorf("release fenced agent control task: %w", err)
+		}
+		affected, _ := result.RowsAffected()
+		changed = affected > 0
+		if !changed || !assignee.Valid || strings.TrimSpace(assignee.String) == "" {
+			return nil
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE teammates SET state = ?, updated_at = ?
+			WHERE id = ? AND team_id = (
+				SELECT team_id FROM agent_control_task_records
+				WHERE workflow = ? AND task_id = ?
+			)
+		`, string(TeammateStateIdle), formatTime(now), strings.TrimSpace(assignee.String),
+			agentcontrol.WorkflowSpawnTeam, id); err != nil {
+			return fmt.Errorf("release fenced task teammate state: %w", err)
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	if !changed {
+		if fencingToken != "" || status != TaskStatusCancelled {
+			return s.fencedTaskMutationFailure(ctx, id, fencingToken, "release")
+		}
+		return s.taskMutationFailure(ctx, id, "release")
+	}
+	_ = s.appendTaskSignalForTask(ctx, id, TaskSignalTaskReleased, status)
+	return nil
+}
+
+// RetryTaskWithFencing atomically increments retry_count and returns a task to
+// a non-running queue state. Empty fencingToken is the forced control-plane
+// reclaim path; a non-empty token must match the current attempt. When
+// expectedVersion is positive, the update is also compare-and-swap fenced
+// against the task version observed by the caller.
+func (s *SQLiteStore) RetryTaskWithFencing(ctx context.Context, id string, status TaskStatus, summary, fencingToken string, expectedVersion int64) error {
+	if s == nil {
+		return fmt.Errorf("team store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return err
+	}
+	id = strings.TrimSpace(id)
+	fencingToken = strings.TrimSpace(fencingToken)
+	if id == "" {
+		return fmt.Errorf("task id is required")
+	}
+	switch status {
+	case TaskStatusPending, TaskStatusReady, TaskStatusReclaimPending:
+	default:
+		return fmt.Errorf("retry cannot transition task to %s", status)
+	}
+	now := time.Now().UTC()
+	changed := false
+	if err := s.WithImmediateTx(ctx, func(tx *sql.Tx) error {
+		var assignee sql.NullString
+		if err := tx.QueryRowContext(ctx, `
+			SELECT assignee
+			FROM agent_control_task_records
+			WHERE workflow = ? AND task_id = ?
+		`, agentcontrol.WorkflowSpawnTeam, id).Scan(&assignee); err != nil {
+			if err == sql.ErrNoRows {
+				return fmt.Errorf("task not found: %s", id)
+			}
+			return fmt.Errorf("load task before fenced retry: %w", err)
+		}
+		query := `
+			UPDATE agent_control_task_records
+			SET status = ?,
+				summary = CASE WHEN ? <> '' THEN ? ELSE summary END,
+				assignee = NULL, session_id = NULL, agent_path = NULL,
+				lease_until = NULL, fencing_token = '',
+				retry_count = retry_count + 1, version = version + 1, updated_at = ?
+			WHERE workflow = ? AND task_id = ?
+			  AND status NOT IN (?, ?, ?)
+			  AND fencing_token = ?
+		`
+		args := []interface{}{
+			string(status), summary, summary, formatTime(now),
+			agentcontrol.WorkflowSpawnTeam, id,
+			string(TaskStatusDone), string(TaskStatusFailed), string(TaskStatusCancelled),
+			fencingToken,
+		}
+		if expectedVersion > 0 {
+			query += " AND version = ?"
+			args = append(args, expectedVersion)
+		}
+		result, err := tx.ExecContext(ctx, query, args...)
+		if err != nil {
+			return fmt.Errorf("retry fenced agent control task: %w", err)
+		}
+		affected, _ := result.RowsAffected()
+		changed = affected > 0
+		if !changed || !assignee.Valid || strings.TrimSpace(assignee.String) == "" {
+			return nil
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE teammates SET state = ?, updated_at = ?
+			WHERE id = ? AND team_id = (
+				SELECT team_id FROM agent_control_task_records
+				WHERE workflow = ? AND task_id = ?
+			)
+		`, string(TeammateStateIdle), formatTime(now), strings.TrimSpace(assignee.String),
+			agentcontrol.WorkflowSpawnTeam, id); err != nil {
+			return fmt.Errorf("retry fenced task teammate state: %w", err)
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	if !changed {
+		if expectedVersion > 0 {
+			task, err := s.getAgentControlTask(ctx, id)
+			if err != nil {
+				return err
+			}
+			if task != nil && task.Version != expectedVersion {
+				return agentcontrol.ErrTaskVersionConflict
+			}
+		}
+		if fencingToken != "" {
+			return s.fencedTaskMutationFailure(ctx, id, fencingToken, "retry")
+		}
+		return s.taskMutationFailure(ctx, id, "retry")
+	}
+	_ = s.appendTaskSignalForTask(ctx, id, TaskSignalTaskRetry, status)
+	return nil
+}
+
+// BlockTaskWithFencing applies a blocked outcome to the current claim attempt.
+// The assignee is retained for handoff compatibility, but the fencing token is
+// cleared so a late duplicate outcome cannot mutate the blocked task again.
+func (s *SQLiteStore) BlockTaskWithFencing(ctx context.Context, id, summary, fencingToken string) error {
+	return s.BlockTaskWithFencingAndState(ctx, id, summary, fencingToken, true)
+}
+
+// BlockTaskWithFencingAndState atomically blocks the current task attempt and,
+// unless requested otherwise, updates its persisted teammate only when that
+// teammate belongs to the task's team.
+func (s *SQLiteStore) BlockTaskWithFencingAndState(ctx context.Context, id, summary, fencingToken string, skipStateUpdate bool) error {
+	if s == nil {
+		return fmt.Errorf("team store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return err
+	}
+	id = strings.TrimSpace(id)
+	fencingToken = strings.TrimSpace(fencingToken)
+	if id == "" {
+		return fmt.Errorf("task id is required")
+	}
+	now := time.Now().UTC()
+	changed := false
+	if err := s.WithImmediateTx(ctx, func(tx *sql.Tx) error {
+		var (
+			assignee sql.NullString
+			teamID   string
+		)
+		if err := tx.QueryRowContext(ctx, `
+			SELECT assignee, team_id
+			FROM agent_control_task_records
+			WHERE workflow = ? AND task_id = ?
+		`, agentcontrol.WorkflowSpawnTeam, id).Scan(&assignee, &teamID); err != nil {
+			if err == sql.ErrNoRows {
+				return fmt.Errorf("task not found: %s", id)
+			}
+			return fmt.Errorf("load task before fenced block: %w", err)
+		}
+		result, err := tx.ExecContext(ctx, `
+			UPDATE agent_control_task_records
+			SET status = ?, summary = ?, lease_until = NULL,
+				fencing_token = '', version = version + 1, updated_at = ?
+			WHERE workflow = ? AND task_id = ?
+			  AND status IN (?, ?) AND fencing_token = ?
+		`, string(TaskStatusBlocked), summary, formatTime(now), agentcontrol.WorkflowSpawnTeam, id,
+			string(TaskStatusRunning), string(TaskStatusReclaimPending), fencingToken)
+		if err != nil {
+			return fmt.Errorf("block fenced agent control task: %w", err)
+		}
+		affected, _ := result.RowsAffected()
+		changed = affected > 0
+		if !changed || skipStateUpdate || !assignee.Valid || strings.TrimSpace(assignee.String) == "" {
+			return nil
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE teammates SET state = ?, updated_at = ?
+			WHERE id = ? AND team_id = ?
+		`, string(TeammateStateBlocked), formatTime(now), strings.TrimSpace(assignee.String), teamID); err != nil {
+			return fmt.Errorf("block fenced task teammate state: %w", err)
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	if !changed {
+		return s.fencedTaskMutationFailure(ctx, id, fencingToken, "block")
+	}
+	_ = s.appendTaskSignalForTask(ctx, id, TaskSignalTaskBlocked, TaskStatusBlocked)
+	return nil
+}
+
+func (s *SQLiteStore) fencedTaskMutationFailure(ctx context.Context, id, fencingToken, operation string) error {
+	task, err := s.getAgentControlTask(ctx, id)
+	if err != nil {
+		return err
+	}
+	if task == nil {
+		return fmt.Errorf("task not found: %s", id)
+	}
+	if strings.TrimSpace(task.FencingToken) != strings.TrimSpace(fencingToken) {
+		return agentcontrol.ErrTaskFencingMismatch
+	}
+	return fmt.Errorf("%s rejected for task %s in status %s", operation, id, task.Status)
+}
+
+func (s *SQLiteStore) taskMutationFailure(ctx context.Context, id, operation string) error {
+	task, err := s.getAgentControlTask(ctx, id)
+	if err != nil {
+		return err
+	}
+	if task == nil {
+		return fmt.Errorf("task not found: %s", id)
+	}
+	return fmt.Errorf("%s rejected for task %s in status %s", operation, id, task.Status)
 }
 
 // UpdateAgentControlTaskRouteAudit updates latest route audit metadata without
@@ -1187,6 +1831,16 @@ func (s *SQLiteStore) MarkAgentControlTaskRecordsReady(ctx context.Context, team
 
 // ClaimTask attempts to claim a ready task.
 func (s *SQLiteStore) ClaimTask(ctx context.Context, id string, assignee string, leaseUntil time.Time, expectedVersion int64) (bool, error) {
+	return s.claimTask(ctx, id, assignee, leaseUntil, expectedVersion, "", "")
+}
+
+// ClaimTaskWithOwnerFence claims a ready task only while the supplied
+// orchestrator owner lease remains valid in the claim transaction.
+func (s *SQLiteStore) ClaimTaskWithOwnerFence(ctx context.Context, id string, assignee string, leaseUntil time.Time, expectedVersion int64, ownerID, ownerToken string) (bool, error) {
+	return s.claimTask(ctx, id, assignee, leaseUntil, expectedVersion, ownerID, ownerToken)
+}
+
+func (s *SQLiteStore) claimTask(ctx context.Context, id string, assignee string, leaseUntil time.Time, expectedVersion int64, ownerID, ownerToken string) (bool, error) {
 	if s == nil {
 		return false, fmt.Errorf("team store is not initialized")
 	}
@@ -1220,6 +1874,15 @@ func (s *SQLiteStore) ClaimTask(ctx context.Context, id string, assignee string,
 		SET status = ?, assignee = ?, session_id = ?, agent_path = ?, lease_until = ?, version = version + 1,
 			attempt = attempt + 1, fencing_token = lower(hex(randomblob(16))), updated_at = ?
 		WHERE workflow = ? AND task_id = ? AND status = ?
+		  AND EXISTS (
+			SELECT 1 FROM teams
+			WHERE teams.id = agent_control_task_records.team_id AND teams.status = ?
+		  )
+		  AND EXISTS (
+			SELECT 1 FROM teammates
+			WHERE teammates.id = ? AND teammates.team_id = agent_control_task_records.team_id
+			  AND teammates.state = ? AND TRIM(teammates.session_id) <> ''
+		  )
 	`
 	args := []interface{}{
 		string(TaskStatusRunning),
@@ -1231,6 +1894,21 @@ func (s *SQLiteStore) ClaimTask(ctx context.Context, id string, assignee string,
 		agentcontrol.WorkflowSpawnTeam,
 		id,
 		string(TaskStatusReady),
+		string(TeamStatusActive),
+		assignee,
+		string(TeammateStateIdle),
+	}
+	if strings.TrimSpace(ownerToken) != "" {
+		query += `
+		  AND EXISTS (
+			SELECT 1 FROM orchestrator_owner_leases
+			WHERE orchestrator_owner_leases.team_id = agent_control_task_records.team_id
+			  AND orchestrator_owner_leases.owner_id = ?
+			  AND orchestrator_owner_leases.fencing_token = ?
+			  AND orchestrator_owner_leases.lease_until >= ?
+		  )
+		`
+		args = append(args, strings.TrimSpace(ownerID), strings.TrimSpace(ownerToken), formatTime(now))
 	}
 	if expectedVersion > 0 {
 		query += " AND version = ?"
@@ -1245,6 +1923,23 @@ func (s *SQLiteStore) ClaimTask(ctx context.Context, id string, assignee string,
 		if affected == 0 {
 			return nil
 		}
+		teammateResult, err := tx.ExecContext(ctx, `
+			UPDATE teammates
+			SET state = ?, updated_at = ?
+			WHERE id = ?
+			  AND team_id = (
+				SELECT team_id FROM agent_control_task_records
+				WHERE workflow = ? AND task_id = ?
+			  )
+			  AND state = ? AND TRIM(session_id) <> ''
+		`, string(TeammateStateBusy), formatTime(now), assignee, agentcontrol.WorkflowSpawnTeam, id, string(TeammateStateIdle))
+		if err != nil {
+			return fmt.Errorf("mark claimed teammate busy: %w", err)
+		}
+		teammateAffected, _ := teammateResult.RowsAffected()
+		if teammateAffected == 0 {
+			return fmt.Errorf("teammate is no longer eligible to claim task %s", id)
+		}
 		claimed = true
 		return nil
 	}); err != nil {
@@ -1258,6 +1953,16 @@ func (s *SQLiteStore) ClaimTask(ctx context.Context, id string, assignee string,
 
 // ClaimTaskWithPathClaims atomically claims a task and records any path claims.
 func (s *SQLiteStore) ClaimTaskWithPathClaims(ctx context.Context, task Task, assignee string, leaseUntil time.Time, workspaceRoot string) (bool, error) {
+	return s.claimTaskWithPathClaims(ctx, task, assignee, leaseUntil, workspaceRoot, "", "")
+}
+
+// ClaimTaskWithPathClaimsAndOwnerFence atomically validates the orchestrator
+// owner lease, claims the task, and records its path claims.
+func (s *SQLiteStore) ClaimTaskWithPathClaimsAndOwnerFence(ctx context.Context, task Task, assignee string, leaseUntil time.Time, workspaceRoot, ownerID, ownerToken string) (bool, error) {
+	return s.claimTaskWithPathClaims(ctx, task, assignee, leaseUntil, workspaceRoot, ownerID, ownerToken)
+}
+
+func (s *SQLiteStore) claimTaskWithPathClaims(ctx context.Context, task Task, assignee string, leaseUntil time.Time, workspaceRoot, ownerID, ownerToken string) (bool, error) {
 	if s == nil {
 		return false, fmt.Errorf("team store is not initialized")
 	}
@@ -1284,6 +1989,49 @@ func (s *SQLiteStore) ClaimTaskWithPathClaims(ctx context.Context, task Task, as
 	claimed := false
 
 	err = s.WithImmediateTx(ctx, func(tx *sql.Tx) error {
+		eligibilityQuery := `
+			SELECT EXISTS (
+				SELECT 1
+				FROM agent_control_task_records task
+				JOIN teams ON teams.id = task.team_id AND teams.status = ?
+				JOIN teammates ON teammates.id = ? AND teammates.team_id = task.team_id
+					AND teammates.state = ? AND TRIM(teammates.session_id) <> ''
+				WHERE task.workflow = ? AND task.task_id = ? AND task.team_id = ? AND task.status = ?
+		`
+		eligibilityArgs := []interface{}{
+			string(TeamStatusActive),
+			assignee,
+			string(TeammateStateIdle),
+			agentcontrol.WorkflowSpawnTeam,
+			taskID,
+			teamID,
+			string(TaskStatusReady),
+		}
+		if strings.TrimSpace(ownerToken) != "" {
+			eligibilityQuery += `
+				AND EXISTS (
+					SELECT 1 FROM orchestrator_owner_leases
+					WHERE orchestrator_owner_leases.team_id = task.team_id
+					  AND orchestrator_owner_leases.owner_id = ?
+					  AND orchestrator_owner_leases.fencing_token = ?
+					  AND orchestrator_owner_leases.lease_until >= ?
+				)
+			`
+			eligibilityArgs = append(eligibilityArgs, strings.TrimSpace(ownerID), strings.TrimSpace(ownerToken), formatTime(now))
+		}
+		if task.Version > 0 {
+			eligibilityQuery += " AND task.version = ?"
+			eligibilityArgs = append(eligibilityArgs, task.Version)
+		}
+		eligibilityQuery += ")"
+		var eligible int
+		if err := tx.QueryRowContext(ctx, eligibilityQuery, eligibilityArgs...).Scan(&eligible); err != nil {
+			return fmt.Errorf("check task claim eligibility: %w", err)
+		}
+		if eligible == 0 {
+			return nil
+		}
+
 		// Drop expired claims before checking overlap so stale rows do not block assignment.
 		if _, err := tx.ExecContext(ctx, `
 			DELETE FROM team_path_claims
@@ -1339,8 +2087,8 @@ func (s *SQLiteStore) ClaimTaskWithPathClaims(ctx context.Context, task Task, as
 		claimed = true
 
 		if _, err := tx.ExecContext(ctx, `
-			UPDATE teammates SET state = ?, updated_at = ? WHERE id = ?
-		`, string(TeammateStateBusy), formatTime(now), assignee); err != nil {
+			UPDATE teammates SET state = ?, updated_at = ? WHERE id = ? AND team_id = ?
+		`, string(TeammateStateBusy), formatTime(now), assignee, teamID); err != nil {
 			return fmt.Errorf("update teammate state: %w", err)
 		}
 
@@ -1581,8 +2329,8 @@ func (s *SQLiteStore) insertAgentControlTaskRecordTx(ctx context.Context, tx *sq
 		INSERT INTO agent_control_task_records (
 			workflow, task_id, team_id, parent_task_id, assignee, session_id, agent_path,
 			title, goal, difficulty, difficulty_rationale, task_type, task_subject, inputs_json, summary, status, priority, lease_until, retry_count,
-			read_paths_json, write_paths_json, deliverables_json, result_ref, version, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			read_paths_json, write_paths_json, deliverables_json, result_ref, version, attempt, fencing_token, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 	if upsert {
 		query += `
@@ -1609,6 +2357,8 @@ func (s *SQLiteStore) insertAgentControlTaskRecordTx(ctx context.Context, tx *sq
 			deliverables_json = excluded.deliverables_json,
 			result_ref = excluded.result_ref,
 			version = excluded.version,
+			attempt = excluded.attempt,
+			fencing_token = excluded.fencing_token,
 			updated_at = excluded.updated_at
 	`
 	}
@@ -1637,6 +2387,8 @@ func (s *SQLiteStore) insertAgentControlTaskRecordTx(ctx context.Context, tx *sq
 		deliverableJSON,
 		nullableString(task.ResultRef),
 		task.Version,
+		task.Attempt,
+		task.FencingToken,
 		formatTime(task.CreatedAt),
 		formatTime(task.UpdatedAt),
 	)
@@ -3675,7 +4427,7 @@ func (s *SQLiteStore) RecordMailReceipt(ctx context.Context, receipt MailReceipt
 		}
 		affected, _ := result.RowsAffected()
 		if affected == 0 {
-			return fmt.Errorf("mail not found")
+			return ErrMailNotFound
 		}
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO team_mailbox_receipts (message_id, team_id, agent_id, acked_at)
@@ -3688,6 +4440,77 @@ func (s *SQLiteStore) RecordMailReceipt(ctx context.Context, receipt MailReceipt
 		}
 		return nil
 	})
+}
+
+// RecordMailReceiptOnce records the first acknowledgement for a message and
+// agent. It returns false for an already-recorded receipt without changing its
+// timestamp, so callers can safely suppress duplicate acknowledgement events.
+func (s *SQLiteStore) RecordMailReceiptOnce(ctx context.Context, receipt MailReceipt) (bool, error) {
+	if s == nil {
+		return false, fmt.Errorf("team store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return false, err
+	}
+	receipt.TeamID = strings.TrimSpace(receipt.TeamID)
+	receipt.MessageID = strings.TrimSpace(receipt.MessageID)
+	receipt.AgentID = strings.TrimSpace(receipt.AgentID)
+	if receipt.TeamID == "" || receipt.MessageID == "" {
+		return false, fmt.Errorf("team id and message id are required")
+	}
+	if receipt.AgentID == "" {
+		receipt.AgentID = globalMailReceiptAgent
+	}
+	if receipt.AckedAt.IsZero() {
+		receipt.AckedAt = time.Now().UTC()
+	}
+
+	recorded := false
+	err := s.WithImmediateTx(ctx, func(tx *sql.Tx) error {
+		var exists int
+		err := tx.QueryRowContext(ctx, `
+			SELECT 1
+			FROM agent_control_mailbox_records
+			WHERE scope = ? AND workflow = ? AND team_id = ? AND message_id = ?
+			LIMIT 1
+		`, agentcontrol.MailboxScopeTeam, agentcontrol.WorkflowSpawnTeam, receipt.TeamID, receipt.MessageID).Scan(&exists)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrMailNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("find mail for receipt: %w", err)
+		}
+
+		result, err := tx.ExecContext(ctx, `
+			INSERT INTO team_mailbox_receipts (message_id, team_id, agent_id, acked_at)
+			VALUES (?, ?, ?, ?)
+			ON CONFLICT(team_id, message_id, agent_id) DO NOTHING
+		`, receipt.MessageID, receipt.TeamID, receipt.AgentID, formatTime(receipt.AckedAt))
+		if err != nil {
+			return fmt.Errorf("record mail receipt: %w", err)
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("read mail receipt result: %w", err)
+		}
+		if affected == 0 {
+			return nil
+		}
+
+		if receipt.AgentID == globalMailReceiptAgent {
+			_, err = tx.ExecContext(ctx, `
+				UPDATE agent_control_mailbox_records
+				SET acked_at = COALESCE(acked_at, ?)
+				WHERE scope = ? AND workflow = ? AND team_id = ? AND message_id = ?
+			`, formatTime(receipt.AckedAt), agentcontrol.MailboxScopeTeam, agentcontrol.WorkflowSpawnTeam, receipt.TeamID, receipt.MessageID)
+			if err != nil {
+				return fmt.Errorf("update agent control mailbox record acked_at: %w", err)
+			}
+		}
+		recorded = true
+		return nil
+	})
+	return recorded, err
 }
 
 // ListMailReceipts returns recorded receipts for a message.
@@ -3855,32 +4678,84 @@ func (s *SQLiteStore) DeleteExpiredPathClaims(ctx context.Context, teamID string
 
 // AppendTeamEvent stores a team event and returns its sequence number.
 func (s *SQLiteStore) AppendTeamEvent(ctx context.Context, event TeamEvent) (int64, error) {
+	seq, _, err := s.appendTeamEvent(ctx, event, "")
+	return seq, err
+}
+
+// AppendTerminalTaskEventOnce atomically appends a terminal task event only if
+// the same event type has not already been persisted for this task.
+func (s *SQLiteStore) AppendTerminalTaskEventOnce(ctx context.Context, event TeamEvent) (int64, bool, error) {
+	taskID := teamEventPayloadString(event.Payload["task_id"])
+	if taskID == "" {
+		return 0, false, fmt.Errorf("task id is required for terminal task event")
+	}
+	return s.appendTeamEvent(ctx, event, taskID)
+}
+
+func (s *SQLiteStore) appendTeamEvent(ctx context.Context, event TeamEvent, dedupeTaskID string) (int64, bool, error) {
 	if s == nil {
-		return 0, fmt.Errorf("team store is not initialized")
+		return 0, false, fmt.Errorf("team store is not initialized")
 	}
 	if err := s.ensure(); err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	teamID := strings.TrimSpace(event.TeamID)
 	if teamID == "" {
-		return 0, fmt.Errorf("team id is required")
+		return 0, false, fmt.Errorf("team id is required")
 	}
 	eventType := strings.TrimSpace(event.Type)
 	if eventType == "" {
-		return 0, fmt.Errorf("event type is required")
+		return 0, false, fmt.Errorf("event type is required")
 	}
 	if event.Timestamp.IsZero() {
 		event.Timestamp = time.Now().UTC()
 	}
 	payloadJSON, err := encodeMetadata(event.Payload)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	createdAt := formatTime(event.Timestamp)
 
 	var seq int64
+	appended := true
 	var wakeEvent agentcontrol.WakeEvent
 	if err := s.WithImmediateTx(ctx, func(tx *sql.Tx) error {
+		if dedupeTaskID != "" {
+			rows, err := tx.QueryContext(ctx, `
+				SELECT seq, payload_json
+				FROM team_events
+				WHERE team_id = ? AND type = ?
+				ORDER BY seq ASC
+			`, teamID, eventType)
+			if err != nil {
+				return fmt.Errorf("check duplicate terminal task event: %w", err)
+			}
+			for rows.Next() {
+				var (
+					existingSeq int64
+					rawPayload  string
+				)
+				if err := rows.Scan(&existingSeq, &rawPayload); err != nil {
+					_ = rows.Close()
+					return fmt.Errorf("scan duplicate terminal task event: %w", err)
+				}
+				var payload map[string]interface{}
+				if json.Unmarshal([]byte(rawPayload), &payload) == nil &&
+					teamEventPayloadString(payload["task_id"]) == dedupeTaskID {
+					seq = existingSeq
+					appended = false
+					break
+				}
+			}
+			rowsErr := rows.Err()
+			_ = rows.Close()
+			if rowsErr != nil {
+				return fmt.Errorf("read duplicate terminal task events: %w", rowsErr)
+			}
+			if !appended {
+				return nil
+			}
+		}
 		if err := tx.QueryRowContext(ctx, `
 			SELECT COALESCE(MAX(seq), 0) + 1 FROM team_events WHERE team_id = ?
 		`, teamID).Scan(&seq); err != nil {
@@ -3930,10 +4805,12 @@ func (s *SQLiteStore) AppendTeamEvent(ctx context.Context, event TeamEvent) (int
 		}.Normalize()
 		return nil
 	}); err != nil {
-		return 0, err
+		return 0, false, err
 	}
-	s.notifyAgentControlWakeWatchers(wakeEvent)
-	return seq, nil
+	if appended {
+		s.notifyAgentControlWakeWatchers(wakeEvent)
+	}
+	return seq, appended, nil
 }
 
 // ListTeamEvents returns persisted team events after the given sequence.
@@ -4668,6 +5545,66 @@ func (s *SQLiteStore) init(ctx context.Context) error {
 			UpSQL: `
 				ALTER TABLE agent_control_task_records ADD COLUMN task_type TEXT NOT NULL DEFAULT '';
 				ALTER TABLE agent_control_task_records ADD COLUMN task_subject TEXT NOT NULL DEFAULT '';
+			`,
+		},
+		{
+			Version: 26,
+			Name:    "team_product_definitions_runs",
+			UpSQL: `
+				CREATE TABLE IF NOT EXISTS team_definitions (
+					id TEXT PRIMARY KEY,
+					owner_id TEXT NOT NULL,
+					workspace_id TEXT NOT NULL,
+					name TEXT NOT NULL,
+					description TEXT NOT NULL DEFAULT '',
+					version INTEGER NOT NULL CHECK (version > 0),
+					config_json TEXT NOT NULL CHECK (json_valid(config_json)),
+					archived_at TEXT,
+					created_at TEXT NOT NULL,
+					updated_at TEXT NOT NULL
+				);
+				CREATE INDEX IF NOT EXISTS idx_team_definitions_owner_workspace_updated
+				ON team_definitions(owner_id, workspace_id, archived_at, updated_at DESC);
+
+				CREATE TABLE IF NOT EXISTS team_runs (
+					id TEXT PRIMARY KEY,
+					owner_id TEXT NOT NULL,
+					workspace_id TEXT NOT NULL,
+					definition_id TEXT,
+					definition_version INTEGER,
+					legacy_team_id TEXT,
+					goal TEXT NOT NULL,
+					status TEXT NOT NULL,
+					phase TEXT NOT NULL,
+					compatibility_mode TEXT NOT NULL,
+					snapshot_schema_version INTEGER NOT NULL CHECK (snapshot_schema_version > 0),
+					config_snapshot_json TEXT NOT NULL CHECK (json_valid(config_snapshot_json)),
+					snapshot_checksum TEXT NOT NULL,
+					version INTEGER NOT NULL CHECK (version > 0),
+					event_seq INTEGER NOT NULL DEFAULT 0 CHECK (event_seq >= 0),
+					summary_state TEXT NOT NULL,
+					idempotency_key_hash TEXT NOT NULL,
+					request_digest TEXT NOT NULL,
+					request_id TEXT,
+					created_at TEXT NOT NULL,
+					started_at TEXT,
+					terminal_at TEXT,
+					UNIQUE(owner_id, idempotency_key_hash)
+				);
+				CREATE INDEX IF NOT EXISTS idx_team_runs_owner_workspace_created
+				ON team_runs(owner_id, workspace_id, created_at DESC);
+				CREATE INDEX IF NOT EXISTS idx_team_runs_definition_version
+				ON team_runs(owner_id, definition_id, definition_version);
+				CREATE INDEX IF NOT EXISTS idx_team_runs_legacy_team
+				ON team_runs(legacy_team_id);
+			`,
+		},
+		{
+			Version: 27,
+			Name:    "team_run_start_idempotency",
+			UpSQL: `
+				ALTER TABLE team_runs ADD COLUMN start_idempotency_key_hash TEXT;
+				ALTER TABLE team_runs ADD COLUMN start_request_digest TEXT;
 			`,
 		},
 	}

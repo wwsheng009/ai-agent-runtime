@@ -3,6 +3,7 @@ package team
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -338,6 +339,60 @@ func TestApplyTerminalTaskOutcomeReleasesTaskAndSetsResultRef(t *testing.T) {
 	assert.Equal(t, "artifact://build-1", events[0].Payload["result_ref"])
 }
 
+func TestApplyTerminalTaskOutcomeRequiresAttemptTokenForClaimedTask(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+
+	teamID, err := store.CreateTeam(ctx, Team{})
+	require.NoError(t, err)
+	_, err = store.UpsertTeammate(ctx, Teammate{
+		ID:        "mate-1",
+		TeamID:    teamID,
+		SessionID: "mate-session",
+		State:     TeammateStateIdle,
+	})
+	require.NoError(t, err)
+	taskID, err := store.CreateTask(ctx, Task{
+		TeamID: teamID,
+		Title:  "claimed terminal task",
+		Status: TaskStatusReady,
+	})
+	require.NoError(t, err)
+	task, err := store.GetTask(ctx, taskID)
+	require.NoError(t, err)
+	require.NotNil(t, task)
+
+	record, claimed, err := NewAgentControlTaskRegistry(store).ClaimAgentControlTask(ctx, agentcontrol.TaskClaimRequest{
+		ID:              taskID,
+		Workflow:        agentcontrol.WorkflowSpawnTeam,
+		TeamID:          teamID,
+		Assignee:        "mate-1",
+		ExpectedVersion: task.Version,
+		LeaseUntil:      time.Now().UTC().Add(time.Minute),
+	})
+	require.NoError(t, err)
+	require.True(t, claimed)
+	require.NotNil(t, record)
+	require.NotEmpty(t, record.FencingToken)
+
+	claimedTask, err := store.GetTask(ctx, taskID)
+	require.NoError(t, err)
+	require.NotNil(t, claimedTask)
+	_, err = ApplyTerminalTaskOutcome(ctx, TaskOutcomeApplyServices{Store: store}, TerminalTaskOutcomeRequest{
+		Task:          *claimedTask,
+		TeammateID:    "mate-1",
+		DefaultStatus: TaskOutcomeDone,
+		Outcome:       TaskOutcomeContract{Summary: "unauthorized completion"},
+	})
+	require.ErrorIs(t, err, agentcontrol.ErrTaskFencingMismatch)
+
+	unchanged, err := store.GetTask(ctx, taskID)
+	require.NoError(t, err)
+	require.NotNil(t, unchanged)
+	require.Equal(t, TaskStatusRunning, unchanged.Status)
+	require.Equal(t, record.FencingToken, unchanged.FencingToken)
+}
+
 func TestApplyTerminalTaskOutcomePublishesRouteMetadata(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)
@@ -469,4 +524,53 @@ func TestApplyTerminalTaskOutcomePublishesTerminalTaskEventOnce(t *testing.T) {
 	assert.Equal(t, "prompt_still_exceeds_budget_after_compaction", persisted[0].Payload["failure_reason_code"])
 	require.Len(t, published, 1)
 	assert.Equal(t, "task.failed", published[0].Type)
+}
+
+func TestApplyTerminalTaskOutcomeConcurrentReplayPublishesEventOnce(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	events := NewTeamEventBus()
+
+	teamID, err := store.CreateTeam(ctx, Team{})
+	require.NoError(t, err)
+	taskID, err := store.CreateTask(ctx, Task{
+		TeamID: teamID,
+		Title:  "concurrent terminal task",
+		Status: TaskStatusRunning,
+	})
+	require.NoError(t, err)
+	task, err := store.GetTask(ctx, taskID)
+	require.NoError(t, err)
+	require.NotNil(t, task)
+
+	published := make(chan TeamEvent, 2)
+	events.Subscribe("", func(event TeamEvent) {
+		published <- event
+	})
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			<-start
+			_, applyErr := ApplyTerminalTaskOutcome(ctx, TaskOutcomeApplyServices{
+				Store:  store,
+				Events: events,
+			}, TerminalTaskOutcomeRequest{
+				Task:          *task,
+				DefaultStatus: TaskOutcomeDone,
+				Outcome:       TaskOutcomeContract{Summary: "concurrent replay"},
+			})
+			errs <- applyErr
+		}()
+	}
+	close(start)
+	require.NoError(t, <-errs)
+	require.NoError(t, <-errs)
+
+	persisted, err := store.ListTeamEvents(ctx, TeamEventFilter{TeamID: teamID})
+	require.NoError(t, err)
+	require.Len(t, persisted, 1)
+	require.Equal(t, "task.completed", persisted[0].Type)
+	require.Equal(t, taskID, persisted[0].Payload["task_id"])
+	require.Len(t, published, 1)
 }

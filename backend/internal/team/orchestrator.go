@@ -350,6 +350,15 @@ func (o *Orchestrator) ClaimReadyTasks(ctx context.Context, teamID string, limit
 	if err != nil {
 		return nil, err
 	}
+	if teamRecord == nil {
+		return nil, fmt.Errorf("team not found: %s", teamID)
+	}
+	// ClaimReadyTasks is also exposed through a Runtime API endpoint, so it
+	// must enforce the lifecycle state itself rather than relying on Run's
+	// polling loop to call it only for active Teams.
+	if teamRecord.Status != TeamStatusActive {
+		return nil, nil
+	}
 	_, _ = o.markAgentControlTasksReady(ctx, teamID)
 
 	readyTasks, err := o.Store.ListTasks(ctx, TaskFilter{
@@ -371,7 +380,10 @@ func (o *Orchestrator) ClaimReadyTasks(ctx context.Context, teamID string, limit
 	idle := make([]Teammate, 0, len(teammates))
 	activeCount := 0
 	for _, mate := range teammates {
-		if mate.State == TeammateStateIdle {
+		// A roster entry is not runnable merely because its persisted state is
+		// idle. Without a bound session the runner cannot execute the claim and
+		// would turn otherwise valid queued work into a failed attempt.
+		if mate.State == TeammateStateIdle && strings.TrimSpace(mate.SessionID) != "" {
 			idle = append(idle, mate)
 			continue
 		}
@@ -383,12 +395,8 @@ func (o *Orchestrator) ClaimReadyTasks(ctx context.Context, teamID string, limit
 		return nil, nil
 	}
 
-	maxTeammates := 0
-	maxWriters := 0
-	if teamRecord != nil {
-		maxTeammates = teamRecord.MaxTeammates
-		maxWriters = teamRecord.MaxWriters
-	}
+	maxTeammates := teamRecord.MaxTeammates
+	maxWriters := teamRecord.MaxWriters
 	if maxTeammates > 0 {
 		available := maxTeammates - activeCount
 		if available <= 0 {
@@ -822,6 +830,7 @@ func (o *Orchestrator) BlockTask(ctx context.Context, team Team, assignment Assi
 		Team:       team,
 		Task:       assignment.Task,
 		TeammateID: assignment.Teammate.ID,
+		FencingToken: assignment.Task.FencingToken,
 		Outcome: TaskOutcomeContract{
 			Summary:   strings.TrimSpace(summary),
 			HandoffTo: strings.TrimSpace(handoffTo),
@@ -870,6 +879,7 @@ func (o *Orchestrator) completeTaskWithRunResult(ctx context.Context, assignment
 	}, TerminalTaskOutcomeRequest{
 		Task:          assignment.Task,
 		TeammateID:    assignment.Teammate.ID,
+		FencingToken:  assignment.Task.FencingToken,
 		DefaultStatus: TaskOutcomeDone,
 		Outcome: TaskOutcomeContract{
 			Summary: strings.TrimSpace(summary),
@@ -909,6 +919,7 @@ func (o *Orchestrator) failTaskWithRunResult(ctx context.Context, assignment Ass
 	}, TerminalTaskOutcomeRequest{
 		Task:          assignment.Task,
 		TeammateID:    assignment.Teammate.ID,
+		FencingToken:  assignment.Task.FencingToken,
 		DefaultStatus: TaskOutcomeFailed,
 		Outcome: TaskOutcomeContract{
 			Summary: strings.TrimSpace(summary),

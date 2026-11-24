@@ -1,16 +1,13 @@
 // 由 components/workspace/runtime-teams.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { useSearchParams } from "react-router-dom";
 
 import { useRuntimeTeamDispatch } from "@/components/workspace/runtime-teams/use-runtime-team-dispatch";
 import {
   ackRuntimeTeamMailboxMessage,
   checkRuntimeTeamPathClaims,
-  getRuntimeTeamTaskGraph,
-  listRuntimeTeamEvents,
-  listRuntimeTeamMailbox,
-  listRuntimeTeamTasks,
   sendRuntimeTeamMailboxMessage,
   type RuntimeCheckTeamPathClaimsResponse,
 } from "@/lib/runtime-api";
@@ -18,18 +15,19 @@ import { cn } from "@/lib/utils";
 import {
   createEmptyDetails,
   parsePathLines,
-  sortEvents,
-  sortMailbox,
-  sortTasks,
   type ClaimCheckState,
   type TeamDetailsState,
 } from "@/components/workspace/runtime-teams/shared";
 
 import { TeamsDirectoryView } from "./runtime-teams/directory-view";
 import { TeamsDispatchView } from "./runtime-teams/dispatch-view";
+import { RuntimeTeamRunsView } from "./runtime-teams/runtime-team-runs-view";
 import { TeamsSummarySection } from "./runtime-teams/summary-section";
 import { type RuntimeTeamsProps, type RuntimeTeamsView } from "./runtime-teams/types";
+import { useTeamRuns } from "./runtime-teams/use-team-runs";
+import { useTeamDetailsActions } from "./runtime-teams/use-team-details-actions";
 import { useTeamDetailsLoader } from "./runtime-teams/use-team-details-loader";
+import { useTeamDetailsPolling } from "./runtime-teams/use-team-details-polling";
 
 export function RuntimeTeams({
   className,
@@ -42,7 +40,18 @@ export function RuntimeTeams({
   teams,
 }: RuntimeTeamsProps) {
   const { t } = useTranslation("workspace");
-  const [activeView, setActiveView] = useState<RuntimeTeamsView>("teams");
+  const [searchParams, setSearchParams] = useSearchParams();
+  const requestedView = searchParams.get("team_view");
+  const activeView: RuntimeTeamsView =
+    requestedView === "teams" ||
+    requestedView === "runs" ||
+    requestedView === "dispatch"
+      ? requestedView
+      : searchParams.has("team_run_id")
+        ? "runs"
+        : teams.length === 0
+          ? "dispatch"
+          : "teams";
   const [selectedTeamId, setSelectedTeamId] = useState("");
   const [details, setDetails] = useState<TeamDetailsState>(createEmptyDetails);
   const [detailsError, setDetailsError] = useState<string | null>(null);
@@ -60,11 +69,57 @@ export function RuntimeTeams({
   const [isCheckingClaims, setIsCheckingClaims] = useState(false);
   const [claimCheckError, setClaimCheckError] = useState<string | null>(null);
   const [claimCheckState, setClaimCheckState] = useState<ClaimCheckState>(null);
+  const selectedTeamIdRef = useRef(selectedTeamId);
+  selectedTeamIdRef.current = selectedTeamId;
+
+  function setActiveView(view: RuntimeTeamsView) {
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current);
+      next.set("team_view", view);
+      return next;
+    });
+  }
+  const {
+    refreshMailboxAndEvents,
+    refreshSelectedTeamTasksAndEvents,
+  } = useTeamDetailsActions({
+    details,
+    selectedTeamIdRef,
+    setDetails,
+    setDetailsError,
+  });
+  const {
+    capabilities: teamRunCapabilities,
+    error: teamRunsError,
+    isLoading: isTeamRunsLoading,
+    refresh: refreshTeamRuns,
+    runs: teamRuns,
+    updateRun: handleRunUpdated,
+  } = useTeamRuns();
 
   const summaryMap = useMemo(
     () => new Map(summaries.map((summary) => [summary.team_id, summary])),
     [summaries],
   );
+  const selectedTeam = teams.find((team) => team.id === selectedTeamId) ?? null;
+  const selectedSummary = selectedTeam ? summaryMap.get(selectedTeam.id) : undefined;
+
+  const activeRunCount = teamRuns.filter(
+    (run) => run.status.trim().toLowerCase() === "active",
+  ).length;
+
+  function handleRefresh() {
+    onRefresh?.();
+    void refreshTeamRuns();
+  }
+
+  function handleOpenLegacyTeam(teamId: string) {
+    if (!teams.some((team) => team.id === teamId)) {
+      return;
+    }
+    setSelectedTeamId(teamId);
+    setActiveView("teams");
+  }
 
   useEffect(() => {
     if (teams.length === 0) {
@@ -77,10 +132,21 @@ export function RuntimeTeams({
   }, [selectedTeamId, teams]);
 
   useEffect(() => {
-    if (teams.length === 0) {
-      setActiveView("dispatch");
+    if (
+      teams.length === 0 &&
+      !searchParams.has("team_view") &&
+      !searchParams.has("team_run_id")
+    ) {
+      setSearchParams(
+        (current) => {
+          const next = new URLSearchParams(current);
+          next.set("team_view", "dispatch");
+          return next;
+        },
+        { replace: true },
+      );
     }
-  }, [teams.length]);
+  }, [searchParams, setSearchParams, teams.length]);
 
   useTeamDetailsLoader({
     selectedTeamId,
@@ -99,9 +165,16 @@ export function RuntimeTeams({
     setWritePathDraft,
   });
 
+  useTeamDetailsPolling({
+    eventCursor: details.eventCursor,
+    isLoading: isDetailsLoading,
+    selectedTeamId,
+    setDetails,
+    setDetailsError,
+    summaryState: details.summaryState,
+    teamStatus: selectedTeam?.status,
+  });
 
-  const selectedTeam = teams.find((team) => team.id === selectedTeamId) ?? null;
-  const selectedSummary = selectedTeam ? summaryMap.get(selectedTeam.id) : undefined;
   const activeTeamCount = teams.filter(
     (team) => (team.status || "").trim().toLowerCase() === "active",
   ).length;
@@ -160,44 +233,11 @@ export function RuntimeTeams({
     teams,
   });
 
-  async function refreshMailboxAndEvents(teamId: string) {
-    const [mailboxResponse, eventsResponse] = await Promise.all([
-      listRuntimeTeamMailbox(teamId, {
-        includeBroadcast: true,
-        limit: 10,
-      }),
-      listRuntimeTeamEvents(teamId, { limit: 12 }),
-    ]);
-
-    setDetails((current) => ({
-      ...current,
-      mailbox: sortMailbox(mailboxResponse.messages),
-      events: sortEvents(eventsResponse.events),
-    }));
-  }
-
-  async function refreshSelectedTeamTasksAndEvents(teamId: string) {
-    const [tasksResponse, graphResponse, eventsResponse] = await Promise.all([
-      listRuntimeTeamTasks(teamId, {
-        includeDependencies: true,
-        includeDependents: true,
-        limit: 12,
-      }),
-      getRuntimeTeamTaskGraph(teamId, { limit: 40 }),
-      listRuntimeTeamEvents(teamId, { limit: 12 }),
-    ]);
-
-    setDetails((current) => ({
-      ...current,
-      tasks: sortTasks(tasksResponse.tasks),
-      graph: graphResponse,
-      events: sortEvents(eventsResponse.events),
-    }));
-  }
   async function handleSendMailboxMessage() {
     if (!selectedTeamId) {
       return;
     }
+    const teamId = selectedTeamId;
     const body = mailboxBodyDraft.trim();
     if (!body) {
       setMailboxError("mailbox body is required");
@@ -207,7 +247,7 @@ export function RuntimeTeams({
     setIsSendingMailbox(true);
     setMailboxError(null);
     try {
-      const response = await sendRuntimeTeamMailboxMessage(selectedTeamId, {
+      const response = await sendRuntimeTeamMailboxMessage(teamId, {
         body,
         from_agent: mailboxFromDraft.trim() || undefined,
         kind: mailboxKindDraft.trim() || undefined,
@@ -215,17 +255,29 @@ export function RuntimeTeams({
         to_agent: mailboxToDraft.trim() || undefined,
       });
 
-      await refreshMailboxAndEvents(selectedTeamId);
+      if (selectedTeamIdRef.current !== teamId) {
+        return;
+      }
       setMailboxBodyDraft("");
       setMailboxTaskDraft("");
+      const refreshError = await refreshMailboxAndEvents(teamId);
+      if (selectedTeamIdRef.current !== teamId) {
+        return;
+      }
 
       if (response.dispatch_error?.trim()) {
         setMailboxError(`mailbox saved, but dispatch failed: ${response.dispatch_error.trim()}`);
+      } else if (refreshError) {
+        setMailboxError(`mailbox saved, but ${refreshError}`);
       }
     } catch (actionError) {
-      setMailboxError(
-        actionError instanceof Error ? actionError.message : "failed to send mailbox message",
-      );
+      if (selectedTeamIdRef.current === teamId) {
+        setMailboxError(
+          actionError instanceof Error
+            ? actionError.message
+            : "failed to send mailbox message",
+        );
+      }
     } finally {
       setIsSendingMailbox(false);
     }
@@ -235,21 +287,26 @@ export function RuntimeTeams({
     if (!selectedTeamId || !messageId) {
       return;
     }
+    const teamId = selectedTeamId;
     setAckingMessageId(messageId);
     setMailboxError(null);
     try {
-      await ackRuntimeTeamMailboxMessage(selectedTeamId, messageId);
-      const ackedAt = new Date().toISOString();
-      setDetails((current) => ({
-        ...current,
-        mailbox: current.mailbox.map((message) =>
-          message.id === messageId ? { ...message, acked_at: ackedAt } : message,
-        ),
-      }));
+      await ackRuntimeTeamMailboxMessage(teamId, messageId);
+      if (selectedTeamIdRef.current !== teamId) {
+        return;
+      }
+      const refreshError = await refreshMailboxAndEvents(teamId);
+      if (selectedTeamIdRef.current === teamId && refreshError) {
+        setMailboxError(`mailbox message acknowledged, but ${refreshError}`);
+      }
     } catch (actionError) {
-      setMailboxError(
-        actionError instanceof Error ? actionError.message : "failed to acknowledge mailbox message",
-      );
+      if (selectedTeamIdRef.current === teamId) {
+        setMailboxError(
+          actionError instanceof Error
+            ? actionError.message
+            : "failed to acknowledge mailbox message",
+        );
+      }
     } finally {
       setAckingMessageId("");
     }
@@ -259,6 +316,7 @@ export function RuntimeTeams({
     if (!selectedTeamId) {
       return;
     }
+    const teamId = selectedTeamId;
     const readPaths = parsePathLines(readPathDraft);
     const writePaths = parsePathLines(writePathDraft);
     if (readPaths.length === 0 && writePaths.length === 0) {
@@ -271,19 +329,26 @@ export function RuntimeTeams({
     setClaimCheckError(null);
     try {
       const response: RuntimeCheckTeamPathClaimsResponse =
-        await checkRuntimeTeamPathClaims(selectedTeamId, {
+        await checkRuntimeTeamPathClaims(teamId, {
           readPaths,
           writePaths,
         });
+      if (selectedTeamIdRef.current !== teamId) {
+        return;
+      }
       setClaimCheckState({
         ok: response.ok,
         conflicts: response.conflicts,
       });
     } catch (actionError) {
-      setClaimCheckError(
-        actionError instanceof Error ? actionError.message : "failed to check path claim conflicts",
-      );
-      setClaimCheckState(null);
+      if (selectedTeamIdRef.current === teamId) {
+        setClaimCheckError(
+          actionError instanceof Error
+            ? actionError.message
+            : "failed to check path claim conflicts",
+        );
+        setClaimCheckState(null);
+      }
     } finally {
       setIsCheckingClaims(false);
     }
@@ -301,11 +366,14 @@ export function RuntimeTeams({
 
       <TeamsSummarySection
         activeTeamCount={activeTeamCount}
+        activeRunCount={activeRunCount}
         activeView={activeView}
+        capabilities={teamRunCapabilities}
         error={error}
         isLoading={isLoading}
         isRefreshing={isRefreshing}
-        onRefresh={onRefresh}
+        onRefresh={handleRefresh}
+        runCount={teamRuns.length}
         selectedTeam={selectedTeam}
         setActiveView={setActiveView}
         teams={teams}
@@ -355,6 +423,16 @@ export function RuntimeTeams({
           teams={teams}
           toggleDispatchTeam={toggleDispatchTeam}
         />
+      ) : activeView === "runs" ? (
+        <RuntimeTeamRunsView
+          capabilities={teamRunCapabilities}
+          error={teamRunsError}
+          isLoading={isTeamRunsLoading}
+          onOpenLegacyTeam={handleOpenLegacyTeam}
+          onRetry={() => void refreshTeamRuns()}
+          onRunUpdated={handleRunUpdated}
+          runs={teamRuns}
+        />
       ) : (
         <TeamsDirectoryView
           ackingMessageId={ackingMessageId}
@@ -377,7 +455,7 @@ export function RuntimeTeams({
           mailboxTaskDraft={mailboxTaskDraft}
           mailboxToDraft={mailboxToDraft}
           readPathDraft={readPathDraft}
-          selectedSummary={selectedSummary}
+          selectedSummary={details.liveSummary ?? selectedSummary}
           selectedTeam={selectedTeam}
           selectedTeamId={selectedTeamId}
           setMailboxBodyDraft={setMailboxBodyDraft}

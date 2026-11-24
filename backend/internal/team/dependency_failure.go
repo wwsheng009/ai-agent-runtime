@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 )
 
 const TaskDependencyFailedEvent = "task.dependency_failed"
@@ -48,18 +50,32 @@ func ReconcileFailedTaskDependencies(ctx context.Context, store Store, teamID st
 	if err != nil {
 		return nil, err
 	}
+	registry := NewAgentControlTaskRegistry(store)
 	for _, failure := range failures {
-		if err := store.UpdateTaskStatus(ctx, failure.TaskID, TaskStatusFailed, failure.Summary); err != nil {
+		task, err := store.GetTask(ctx, failure.TaskID)
+		if err != nil {
 			return nil, err
 		}
-		if err := store.ReleaseTask(ctx, failure.TaskID, TaskStatusFailed); err != nil {
+		if task == nil {
+			return nil, fmt.Errorf("dependency failure task not found: %s", failure.TaskID)
+		}
+		teammateID := strings.TrimSpace(failure.Assignee)
+		if teammateID == "" {
+			teammateID = taskAssigneeID(*task)
+		}
+		if _, err := registry.UpdateAgentControlTaskTerminal(ctx, agentcontrol.TaskTerminalUpdateRequest{
+			ID:           task.ID,
+			Workflow:     agentcontrol.WorkflowSpawnTeam,
+			TeamID:       teamID,
+			Status:       string(TaskStatusFailed),
+			Summary:      failure.Summary,
+			TeammateID:   teammateID,
+			FencingToken: task.FencingToken,
+		}); err != nil {
 			return nil, err
 		}
 		if err := ReleaseTaskPathClaims(ctx, nil, store, failure.TaskID); err != nil {
 			return nil, err
-		}
-		if failure.Assignee != "" {
-			_ = store.UpdateTeammateState(ctx, failure.Assignee, TeammateStateIdle)
 		}
 		if _, err := store.AppendTeamEvent(ctx, dependencyFailureEvent(teamID, failure, time.Now().UTC())); err != nil {
 			return nil, err

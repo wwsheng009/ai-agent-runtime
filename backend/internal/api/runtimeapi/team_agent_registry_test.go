@@ -33,6 +33,7 @@ func TestUpsertTeammateWritesAgentRegistryImmediately(t *testing.T) {
 		"session_id":"mate-session",
 		"state":"idle"
 	}`))
+	req.RemoteAddr = "127.0.0.1:4321"
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -81,6 +82,7 @@ func TestUpdateTeammateWritesAgentRegistryAndDoesNotReopenClosedRecord(t *testin
 		"profile":"build-engineer",
 		"session_id":"patched-session"
 	}`))
+	req.RemoteAddr = "127.0.0.1:4321"
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -104,6 +106,7 @@ func TestUpdateTeammateWritesAgentRegistryAndDoesNotReopenClosedRecord(t *testin
 		"name":"Builder v2",
 		"profile":"reviewer"
 	}`))
+	req.RemoteAddr = "127.0.0.1:4321"
 	req.Header.Set("Content-Type", "application/json")
 	rec = httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -145,6 +148,7 @@ func TestUpdateTeammateClearsAgentRegistrySessionBinding(t *testing.T) {
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 	req := httptest.NewRequest(http.MethodPatch, "/api/runtime/teams/team-clear/teammates/member-1", strings.NewReader(`{"session_id":""}`))
+	req.RemoteAddr = "127.0.0.1:4321"
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)

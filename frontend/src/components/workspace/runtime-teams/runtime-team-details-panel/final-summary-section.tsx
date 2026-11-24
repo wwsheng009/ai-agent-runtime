@@ -18,6 +18,15 @@ export function RuntimeTeamFinalSummarySection({
   open,
 }: RuntimeTeamFinalSummarySectionProps) {
   const { t } = useTranslation("workspace");
+  const summaryState = {
+    pending: t("panels.teamsPanels.details.finalSummary.states.pending"),
+    ready: t("panels.teamsPanels.details.finalSummary.states.ready"),
+    failed: t("panels.teamsPanels.details.finalSummary.states.failed"),
+    not_applicable: t(
+      "panels.teamsPanels.details.finalSummary.states.notApplicable",
+    ),
+    unknown: t("panels.teamsPanels.details.finalSummary.states.unknown"),
+  }[details.summaryState];
 
   return (
     <TeamDetailsSection
@@ -26,6 +35,15 @@ export function RuntimeTeamFinalSummarySection({
       open={open}
       onToggle={onToggle}
     >
+      <p
+        className="mb-2 text-xs text-muted-foreground"
+        role="status"
+        aria-live="polite"
+      >
+        {t("panels.teamsPanels.details.finalSummary.state", {
+          state: summaryState,
+        })}
+      </p>
       {details.finalSummary ? (
         <MessageMarkdown
           className="app-text-13"

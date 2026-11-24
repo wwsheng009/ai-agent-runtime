@@ -55,7 +55,12 @@ func TestSQLiteStoreClaimTaskWithPathClaimsSuccess(t *testing.T) {
 
 	teamID, err := store.CreateTeam(ctx, Team{})
 	require.NoError(t, err)
-	_, err = store.UpsertTeammate(ctx, Teammate{ID: "mate-a", TeamID: teamID, State: TeammateStateIdle})
+	_, err = store.UpsertTeammate(ctx, Teammate{
+		ID:        "mate-a",
+		TeamID:    teamID,
+		SessionID: "session-mate-a",
+		State:     TeammateStateIdle,
+	})
 	require.NoError(t, err)
 	taskID, err := store.CreateTask(ctx, Task{
 		TeamID:     teamID,
@@ -98,7 +103,12 @@ func TestSQLiteStoreClaimTaskWithPathClaimsConflictLeavesTaskReady(t *testing.T)
 
 	teamID, err := store.CreateTeam(ctx, Team{})
 	require.NoError(t, err)
-	_, err = store.UpsertTeammate(ctx, Teammate{ID: "mate-a", TeamID: teamID, State: TeammateStateIdle})
+	_, err = store.UpsertTeammate(ctx, Teammate{
+		ID:        "mate-a",
+		TeamID:    teamID,
+		SessionID: "session-mate-a",
+		State:     TeammateStateIdle,
+	})
 	require.NoError(t, err)
 	_, err = store.UpsertTeammate(ctx, Teammate{ID: "mate-b", TeamID: teamID, State: TeammateStateBusy})
 	require.NoError(t, err)

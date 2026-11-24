@@ -10281,6 +10281,18 @@ func renderChatRuntimeTimelineEvent(event runtimeevents.Event) chatRuntimeTimeli
 			title = fmt.Sprintf("failed %s", firstNonEmptyChatValue(teamID, "?"))
 		}
 		details := make([]string, 0, 8)
+		if action == "team.summary.failed" {
+			// Summary failures can be emitted by the local durable Team
+			// reconciler, where there is no HTTP request context. Keep the
+			// correlation field visible without inventing a request id; when
+			// the backend supplied one (for example through session error
+			// metadata), render that value verbatim.
+			requestID := strings.TrimSpace(payloadStringValue(event.Payload["request_id"]))
+			if requestID == "" {
+				requestID = "unavailable"
+			}
+			details = append(details, "  request_id: "+requestID)
+		}
 		if strings.EqualFold(strings.TrimSpace(payloadStringValue(event.Payload["error_type"])), "prompt_preflight") {
 			title += " [prompt preflight]"
 			if reason := promptPreflightReasonSummary(event.Payload); reason != "" {

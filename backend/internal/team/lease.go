@@ -97,16 +97,22 @@ func (m *LeaseManager) ReclaimExpiredTasks(ctx context.Context, teamID string, a
 			continue
 		}
 		if _, err := registry.UpdateAgentControlTaskStatus(ctx, agentcontrol.TaskStatusUpdateRequest{
-			ID:       task.ID,
-			Workflow: agentcontrol.WorkflowSpawnTeam,
-			Status:   string(TaskStatusReclaimPending),
+			ID:           task.ID,
+			Workflow:     agentcontrol.WorkflowSpawnTeam,
+			Status:       string(TaskStatusReclaimPending),
+			FencingToken: task.FencingToken,
 		}); err != nil {
 			return nil, err
 		}
 		// The lease field now carries the reclaim_pending start time (in the
 		// asOf clock domain): the grace window is measured from here, so
 		// sweeps with a fixed asOf behave deterministically.
-		if err := m.Store.RenewTaskLease(ctx, task.ID, now); err != nil {
+		if _, err := registry.RenewAgentControlTaskLease(ctx, agentcontrol.TaskLeaseRenewRequest{
+			ID:           task.ID,
+			Workflow:     agentcontrol.WorkflowSpawnTeam,
+			LeaseUntil:   now,
+			FencingToken: task.FencingToken,
+		}); err != nil {
 			return nil, err
 		}
 		if m.Mailbox != nil {
@@ -153,9 +159,11 @@ func (m *LeaseManager) ReclaimExpiredTasks(ctx context.Context, teamID string, a
 			continue
 		}
 		if _, err := registry.RetryAgentControlTask(ctx, agentcontrol.TaskRetryRequest{
-			ID:       task.ID,
-			Workflow: agentcontrol.WorkflowSpawnTeam,
-			Status:   string(TaskStatusReady),
+			ID:              task.ID,
+			Workflow:        agentcontrol.WorkflowSpawnTeam,
+			Status:          string(TaskStatusReady),
+			ExpectedVersion: task.Version,
+			FencingToken:    task.FencingToken,
 		}); err != nil {
 			return nil, err
 		}
@@ -191,10 +199,18 @@ func (m *LeaseManager) RenewTask(ctx context.Context, taskID string, leaseUntil 
 	if leaseUntil.IsZero() {
 		leaseUntil = time.Now().UTC().Add(5 * time.Minute)
 	}
+	task, err := m.Store.GetTask(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	if task == nil {
+		return fmt.Errorf("task not found: %s", taskID)
+	}
 	if _, err := NewAgentControlTaskRegistry(m.Store).WithClaims(m.Claims).RenewAgentControlTaskLease(ctx, agentcontrol.TaskLeaseRenewRequest{
-		ID:         taskID,
-		Workflow:   agentcontrol.WorkflowSpawnTeam,
-		LeaseUntil: leaseUntil,
+		ID:           taskID,
+		Workflow:     agentcontrol.WorkflowSpawnTeam,
+		LeaseUntil:   leaseUntil,
+		FencingToken: task.FencingToken,
 	}); err != nil {
 		return err
 	}

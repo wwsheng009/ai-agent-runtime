@@ -1,10 +1,13 @@
 // 由 components/workspace/runtime-teams.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
 
 import { RefreshCcwIcon } from "lucide-react";
-import { type Dispatch, type SetStateAction } from "react";
 
 import { Badge } from "@/components/ui/badge";
-import { type RuntimeTeamRecord } from "@/lib/runtime-api";
+import {
+  isRuntimeTeamProductCapabilitySupported,
+  type RuntimeTeamProductCapabilities,
+  type RuntimeTeamRecord,
+} from "@/lib/runtime-api";
 import { truncateIdentifier } from "@/components/workspace/runtime-teams/shared";
 import { cn } from "@/lib/utils";
 import { useTranslation } from "react-i18next";
@@ -13,28 +16,42 @@ import { type RuntimeTeamsView } from "./types";
 
 type TeamsSummarySectionProps = {
   activeTeamCount: number;
+  activeRunCount: number;
   activeView: RuntimeTeamsView;
+  capabilities: RuntimeTeamProductCapabilities;
   error: string | null;
   isLoading: boolean;
   isRefreshing?: boolean;
   onRefresh?: () => void;
+  runCount: number;
   selectedTeam: RuntimeTeamRecord | null;
-  setActiveView: Dispatch<SetStateAction<RuntimeTeamsView>>;
+  setActiveView: (view: RuntimeTeamsView) => void;
   teams: RuntimeTeamRecord[];
 };
 
 export function TeamsSummarySection({
   activeTeamCount,
+  activeRunCount,
   activeView,
+  capabilities,
   error,
   isLoading,
   isRefreshing,
   onRefresh,
+  runCount,
   selectedTeam,
   setActiveView,
   teams,
 }: TeamsSummarySectionProps) {
   const { t } = useTranslation("workspace");
+  const studioDraftCapability = isRuntimeTeamProductCapabilitySupported(
+    capabilities,
+    "run_draft_create",
+  )
+    ? "supported"
+    : capabilities.run_draft_create === "unsupported"
+      ? "unsupported"
+      : "unknown";
 
   return (
     <>
@@ -48,6 +65,16 @@ export function TeamsSummarySection({
               count: activeTeamCount,
             })}
           </Badge>
+          <Badge>
+            {t("panels.teamsPanels.summary.runsBadge", { count: runCount })}
+          </Badge>
+          {activeRunCount > 0 ? (
+            <Badge>
+              {t("panels.teamsPanels.summary.activeRunsBadge", {
+                count: activeRunCount,
+              })}
+            </Badge>
+          ) : null}
           {selectedTeam ? (
             <Badge>{truncateIdentifier(selectedTeam.id, 18)}</Badge>
           ) : null}
@@ -70,6 +97,18 @@ export function TeamsSummarySection({
             )}
           >
             {t("panels.teamsPanels.summary.teamsTab")}
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveView("runs")}
+            className={cn(
+              "rounded-control border px-2.5 py-1.5 text-base uppercase tracking-[0.12em] transition",
+              activeView === "runs"
+                ? "border-accent-teal/30 bg-accent-teal/10 text-accent-teal"
+                : "border-border bg-surface-soft text-muted-foreground hover:border-border-strong hover:bg-surface-soft-hover hover:text-foreground",
+            )}
+          >
+            {t("panels.teamsPanels.summary.runsTab")}
           </button>
           <button
             type="button"
@@ -104,6 +143,20 @@ export function TeamsSummarySection({
           {error}
         </div>
       ) : null}
+
+      <div
+        className="mb-3 rounded-panel border border-border bg-surface-soft px-3.5 py-2.5 text-sm leading-6 text-muted-foreground"
+        role="note"
+      >
+        <p>{t("panels.teamsPanels.summary.modeBoundary")}</p>
+        <p className="mt-1 text-xs text-muted-foreground/80">
+          {studioDraftCapability === "supported"
+            ? t("panels.teamsPanels.summary.studioDraftSupported")
+            : studioDraftCapability === "unsupported"
+              ? t("panels.teamsPanels.summary.studioDraftUnsupported")
+              : t("panels.teamsPanels.summary.studioDraftUnknown")}
+        </p>
+      </div>
 
       {isLoading && teams.length === 0 ? (
         <div className="rounded-panel border border-white/8 bg-white/4 px-3.5 py-3.5 text-sm text-muted-foreground">
