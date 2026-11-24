@@ -2,6 +2,8 @@ package supervision
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"sync"
 	"time"
 )
@@ -46,8 +48,14 @@ func (c *WakeConsumer) startClaimRenewal(claims map[string]ResumeClaim) func() {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				for _, claim := range snapshot {
-					_, _ = c.Admission.RenewClaim(ctx, claim)
+				for index, claim := range snapshot {
+					renewed, ok, err := c.Admission.RenewClaim(ctx, claim)
+					if err == nil && ok {
+						// Keep the private heartbeat snapshot fenced with the
+						// newest version. The caller refreshes its map after
+						// stopping this goroutine, before any final CAS.
+						snapshot[index] = renewed
+					}
 				}
 			}
 		}
@@ -58,6 +66,85 @@ func (c *WakeConsumer) startClaimRenewal(claims map[string]ResumeClaim) func() {
 		once.Do(func() {
 			cancel()
 			<-done
+			// Publish only tokens this worker actually obtained through a
+			// successful renewal. Reading the row by key here would let a
+			// worker that lost its lease adopt a successor's fencing token.
+			for _, claim := range snapshot {
+				if claim.ClaimKey != "" {
+					claims[claim.ClaimKey] = claim
+				}
+			}
 		})
 	}
+}
+
+// startWakeClaimRenewal keeps the ordinary wake lease valid while digest
+// assembly and host delivery are in flight. The scheduler gives one unique
+// owner to every drain; a stale worker therefore cannot renew or mutate a
+// successor's claim.
+func (c *WakeConsumer) startWakeClaimRenewal(parent context.Context, wakes []WakePending) (context.Context, func()) {
+	noop := func() {}
+	if c == nil || c.Wakes == nil || c.Wakes.store == nil || len(wakes) == 0 {
+		return parent, noop
+	}
+	owner := wakeClaimOwner(wakes)
+	if owner == "" {
+		return parent, noop
+	}
+	ids := wakeIDsOf(wakes)
+	if len(ids) == 0 {
+		return parent, noop
+	}
+	interval := c.Wakes.wakeClaimRenewInterval()
+	if interval <= 0 {
+		return parent, noop
+	}
+
+	deliveryCtx, cancelDelivery := context.WithCancelCause(parent)
+	renewalCtx, cancelRenewal := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-renewalCtx.Done():
+				return
+			case <-ticker.C:
+				now := c.clock()
+				renewed, err := c.Wakes.store.RenewWakePending(renewalCtx, ids, owner, now, now.Add(-c.Wakes.claimStaleAfter))
+				if err != nil || renewed != int64(len(ids)) {
+					cancelDelivery(ErrWakeClaimFenceLost)
+					return
+				}
+			}
+		}
+	}()
+
+	var once sync.Once
+	stop := func() {
+		once.Do(func() {
+			cancelRenewal()
+			<-done
+			cancelDelivery(context.Canceled)
+		})
+	}
+	return deliveryCtx, stop
+}
+
+func wakeDeliveryLeaseLost(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	return errors.Is(context.Cause(ctx), ErrWakeClaimFenceLost)
+}
+
+func wakeClaimOwner(wakes []WakePending) string {
+	for _, wake := range wakes {
+		if owner := strings.TrimSpace(wake.ClaimedBy); owner != "" {
+			return owner
+		}
+	}
+	return ""
 }

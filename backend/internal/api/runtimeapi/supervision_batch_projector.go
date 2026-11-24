@@ -148,6 +148,45 @@ func (h *Handler) apiBatchLifecycleProjector() agent.BatchLifecycleProjector {
 	}
 }
 
+// reconcileParkedTurnSettlement repairs the dispatch-before-park ordering
+// window for loop-owned suspensions. A batch/team/job can become terminal
+// before the parent writes its TurnSuspension row; its terminal projector then
+// has no durable wake target. Once the row exists, re-run the strict durable
+// settlement predicate and let the shared wake consumer decide whether the
+// parent is runnable.
+func (h *Handler) reconcileParkedTurnSettlement(ctx context.Context, record *subagentbatch.TurnSuspension) error {
+	if h == nil || record == nil {
+		return nil
+	}
+	parentSessionID := strings.TrimSpace(record.SessionID)
+	if parentSessionID == "" {
+		return nil
+	}
+	rootScopeID := strings.TrimSpace(record.RootScopeID)
+	if rootScopeID == "" {
+		rootScopeID = parentSessionID
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	_, scheduleErr := supervision.ScheduleSettledTurnWakeWithResolvers(
+		ctx,
+		h.getSubagentBatchStore(),
+		h.obligationResolvers(),
+		h.getSupervisionWakeScheduler(),
+		parentSessionID,
+		rootScopeID,
+	)
+	wakeErr := h.drainSupervisedParentWake(ctx, rootScopeID, parentSessionID)
+	if errors.Is(wakeErr, supervision.ErrWakeParentBusy) || errors.Is(wakeErr, supervision.ErrWakeRateLimited) {
+		wakeErr = nil
+	}
+	if scheduleErr != nil {
+		return scheduleErr
+	}
+	return wakeErr
+}
+
 // drainSupervisedParentWake 是 API 宿主的 wake 投递入口：与控制器
 // sessionAgentController.wakeSupervisedParent 共用同一个 consumer 实现，避免
 // batch 终态与 approval 事件走两套 admission 语义。

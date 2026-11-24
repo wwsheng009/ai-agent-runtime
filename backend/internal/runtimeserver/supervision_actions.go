@@ -262,11 +262,17 @@ func (e SupervisionRuntimeExecutor) cancelOneTeam(ctx context.Context, teamID st
 		teamResult.Result = "list team tasks: " + err.Error()
 		return []supervision.NodeActionResult{teamResult}
 	}
+	taskRegistry := team.NewAgentControlTaskRegistry(e.TeamStore)
 	for _, task := range tasks {
 		switch task.Status {
 		case team.TaskStatusPending, team.TaskStatusReady, team.TaskStatusRunning, team.TaskStatusBlocked:
 			result := supervision.NodeActionResult{Kind: supervision.SubjectTeamTask, ID: task.ID, Status: supervision.ActionCompleted, Result: "task cancelled"}
-			if err := e.TeamStore.UpdateTaskStatus(ctx, task.ID, team.TaskStatusCancelled, "cancelled by supervision action"); err != nil {
+			if _, err := taskRegistry.ReleaseAgentControlTask(ctx, agentcontrol.TaskReleaseRequest{
+				ID:       task.ID,
+				Workflow: agentcontrol.WorkflowSpawnTeam,
+				Status:   string(team.TaskStatusCancelled),
+				Summary:  "cancelled by supervision action",
+			}); err != nil {
 				result.Status = supervision.ActionFailed
 				result.Result = err.Error()
 			}
@@ -303,7 +309,12 @@ func (e SupervisionRuntimeExecutor) executeTaskAction(ctx context.Context, actio
 		return supervision.ActionResult{Status: supervision.ActionFailed, Result: "team store is not configured"}, nil
 	}
 	result := supervision.NodeActionResult{Kind: supervision.SubjectTeamTask, ID: action.TargetID, Status: supervision.ActionCompleted, Result: "task cancelled"}
-	if err := e.TeamStore.UpdateTaskStatus(ctx, action.TargetID, team.TaskStatusCancelled, "cancelled by supervision action"); err != nil {
+	if _, err := team.NewAgentControlTaskRegistry(e.TeamStore).ReleaseAgentControlTask(ctx, agentcontrol.TaskReleaseRequest{
+		ID:       action.TargetID,
+		Workflow: agentcontrol.WorkflowSpawnTeam,
+		Status:   string(team.TaskStatusCancelled),
+		Summary:  "cancelled by supervision action",
+	}); err != nil {
 		result.Status = supervision.ActionFailed
 		result.Result = err.Error()
 	}

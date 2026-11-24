@@ -273,6 +273,146 @@ func TestSQLiteStore_WakePending_ClaimIdempotent(t *testing.T) {
 	require.Len(t, items, 0)
 }
 
+func TestSQLiteStore_WakePending_ClaimFenceSurvivesExpiryAndRecovery(t *testing.T) {
+	store := newTestStore(t, "supervision-wake-claim-fence")
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	for _, id := range []string{"wake-reclaim", "wake-submitting", "wake-accepted"} {
+		require.NoError(t, store.InsertWakePending(ctx, WakePending{
+			WakeID:      id,
+			RootScopeID: "root-wake-fence",
+			WakeReason:  "child.failed",
+			DedupKey:    "root-wake-fence|" + id,
+		}))
+	}
+	require.NoError(t, store.MarkWakeDeliveryAccepted(ctx, []string{"wake-accepted"}, true))
+
+	for _, id := range []string{"wake-reclaim", "wake-submitting", "wake-accepted"} {
+		won, err := store.ClaimWakePending(ctx, id, "owner-a", now)
+		require.NoError(t, err)
+		require.True(t, won)
+	}
+	expiredRenewal, err := store.RenewWakePending(
+		ctx,
+		[]string{"wake-reclaim"},
+		"owner-a",
+		now.Add(2*time.Hour),
+		now.Add(time.Hour),
+	)
+	require.NoError(t, err)
+	require.Zero(t, expiredRenewal, "an owner cannot resurrect an expired lease before stale recovery runs")
+	require.NoError(t, store.MarkWakeDeliverySubmittingOwned(ctx, []string{"wake-submitting"}, "owner-a", false, now.Add(-time.Minute)))
+
+	released, err := store.ReleaseStaleWakePending(ctx, now.Add(time.Hour))
+	require.NoError(t, err)
+	require.EqualValues(t, 1, released, "ordinary stale recovery must not release delivery-fenced rows")
+	acceptedReleased, err := store.ReleaseStaleAcceptedWakePending(ctx, now.Add(time.Hour))
+	require.NoError(t, err)
+	require.EqualValues(t, 1, acceptedReleased, "accepted stale recovery is a separate control-plane operation")
+
+	reclaimedAt := now.Add(2 * time.Hour)
+	won, err := store.ClaimWakePending(ctx, "wake-reclaim", "owner-b", reclaimedAt)
+	require.NoError(t, err)
+	require.True(t, won)
+	won, err = store.ClaimWakePending(ctx, "wake-accepted", "owner-b", reclaimedAt)
+	require.NoError(t, err)
+	require.True(t, won)
+
+	renewed, err := store.RenewWakePending(ctx, []string{"wake-reclaim"}, "owner-a", reclaimedAt.Add(time.Minute), reclaimedAt)
+	require.NoError(t, err)
+	require.Zero(t, renewed, "a reclaimed owner cannot renew its successor's lease")
+	ownerReleased, err := store.ReleaseWakePendingOwned(ctx, "wake-reclaim", "owner-a", reclaimedAt.Add(-time.Minute))
+	require.NoError(t, err)
+	require.False(t, ownerReleased, "a reclaimed owner cannot release its successor's claim")
+	resolved, err := store.ResolveWakePendingOwned(ctx, "wake-reclaim", "owner-a", reclaimedAt.Add(-time.Minute))
+	require.NoError(t, err)
+	require.False(t, resolved, "a reclaimed owner cannot delete its successor's wake")
+	require.ErrorIs(t, store.MarkWakeDeliverySubmittingOwned(ctx, []string{"wake-reclaim"}, "owner-a", false, reclaimedAt.Add(-time.Minute)), ErrWakeClaimFenceLost)
+	require.ErrorIs(t, store.MarkWakeDeliveryAcceptedOwned(ctx, []string{"wake-reclaim"}, "owner-a", false, reclaimedAt.Add(-time.Minute)), ErrWakeClaimFenceLost)
+	require.ErrorIs(t, store.MarkWakeDeliveryRejectedOwned(ctx, []string{"wake-reclaim"}, "owner-a", reclaimedAt.Add(-time.Minute)), ErrWakeClaimFenceLost)
+	resolved, err = store.ResolveWakePendingOwned(ctx, "wake-accepted", "owner-a", reclaimedAt.Add(-time.Minute))
+	require.NoError(t, err)
+	require.False(t, resolved, "stale marker-repair owner cannot delete a successor's accepted wake")
+
+	pending, err := store.ListWakePending(ctx, WakeFilter{RootScopeID: "root-wake-fence"})
+	require.NoError(t, err)
+	byID := make(map[string]WakePending, len(pending))
+	for _, wake := range pending {
+		byID[wake.WakeID] = wake
+	}
+	require.Equal(t, "owner-b", byID["wake-reclaim"].ClaimedBy)
+	require.NotNil(t, byID["wake-reclaim"].ClaimedAt)
+	require.Empty(t, byID["wake-reclaim"].DeliveryState)
+	require.Equal(t, "owner-b", byID["wake-accepted"].ClaimedBy)
+	require.NotNil(t, byID["wake-accepted"].ClaimedAt)
+	require.Equal(t, WakeDeliveryStateAccepted, byID["wake-accepted"].DeliveryState)
+	require.Equal(t, "owner-a", byID["wake-submitting"].ClaimedBy)
+	require.NotNil(t, byID["wake-submitting"].ClaimedAt)
+	require.Equal(t, WakeDeliveryStateSubmitting, byID["wake-submitting"].DeliveryState)
+
+	// The current owner may complete the fenced handoff, including resolving an
+	// accepted row whose lease timestamp was cleared by the acceptance CAS.
+	require.NoError(t, store.MarkWakeDeliverySubmittingOwned(ctx, []string{"wake-reclaim"}, "owner-b", false, reclaimedAt.Add(-time.Minute)))
+	require.NoError(t, store.MarkWakeDeliveryAcceptedOwned(ctx, []string{"wake-reclaim"}, "owner-b", false, reclaimedAt.Add(-time.Minute)))
+	resolved, err = store.ResolveWakePendingOwned(ctx, "wake-reclaim", "owner-b", reclaimedAt.Add(-time.Minute))
+	require.NoError(t, err)
+	require.True(t, resolved)
+
+	require.NoError(t, store.MarkWakeDeliveryAcceptedOwned(ctx, []string{"wake-submitting"}, "owner-a", false, now.Add(-time.Minute)))
+	resolved, err = store.ResolveWakePendingOwned(ctx, "wake-submitting", "owner-a", now.Add(-time.Minute))
+	require.NoError(t, err)
+	require.True(t, resolved)
+}
+
+func TestSQLiteStore_CommitWakeConsumptionOwnedRollsBackLedgerOnFenceLoss(t *testing.T) {
+	store := newTestStore(t, "supervision-wake-consumption-rollback")
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	wakes := []WakePending{
+		{
+			WakeID:      "wake-atomic-a",
+			RootScopeID: "root-wake-atomic",
+			NotifyKey:   "notify-atomic-a",
+			DedupKey:    "root-wake-atomic|wake-atomic-a",
+		},
+		{
+			WakeID:      "wake-atomic-b",
+			RootScopeID: "root-wake-atomic",
+			NotifyKey:   "notify-atomic-b",
+			DedupKey:    "root-wake-atomic|wake-atomic-b",
+		},
+	}
+	for _, wake := range wakes {
+		require.NoError(t, store.InsertWakePending(ctx, wake))
+	}
+	claimed, err := store.ClaimWakePending(ctx, wakes[0].WakeID, "owner-a", now)
+	require.NoError(t, err)
+	require.True(t, claimed)
+	claimed, err = store.ClaimWakePending(ctx, wakes[1].WakeID, "owner-b", now)
+	require.NoError(t, err)
+	require.True(t, claimed)
+
+	err = store.CommitWakeConsumptionOwned(
+		ctx,
+		wakes,
+		"owner-a",
+		now.Add(-time.Minute),
+		now,
+		"model_turn",
+		"",
+	)
+	require.ErrorIs(t, err, ErrWakeClaimFenceLost)
+
+	pending, err := store.ListWakePending(ctx, WakeFilter{RootScopeID: "root-wake-atomic"})
+	require.NoError(t, err)
+	require.Len(t, pending, 2, "a failed batch must not resolve an earlier wake")
+	for _, wake := range wakes {
+		delivered, readErr := store.IsWakeDelivered(ctx, wake.NotifyKey)
+		require.NoError(t, readErr)
+		require.False(t, delivered, "a failed batch must roll back every ledger insert")
+	}
+}
+
 func TestSQLiteStore_WakePending_AcceptanceFenceIsDurableAndMonotonic(t *testing.T) {
 	store := newTestStore(t, "supervision-wake-acceptance-fence")
 	ctx := context.Background()

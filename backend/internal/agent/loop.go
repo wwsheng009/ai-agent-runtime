@@ -8917,6 +8917,12 @@ func (loop *ReActLoop) parkBackgroundTurn(ctx context.Context, batch *subagentba
 		loop.agent.reportSuspensionDegraded(ctx, sessionID, "parked-state write failed: "+err.Error())
 		return
 	}
+	// The worker is intentionally started before this turn-owned suspension is
+	// written. It can therefore finish in the gap above and project its
+	// terminal lifecycle before a wake target exists. Reconcile only after the
+	// durable row is visible; the host callback uses the normal wake scheduler
+	// and runnable consumer, never a hidden direct parent turn.
+	_ = loop.agent.projectTurnSuspension(ctx, record)
 	// 发射严格晚于 durable 写入成功：降级宿主与写失败路径都不会出现"已挂起"的假
 	// 信号（AC-C0-1d：两条降级路径均不出现 turn.suspended）。
 	if readErr != nil || !freshEpoch {
@@ -9099,6 +9105,11 @@ func (loop *ReActLoop) parkTeamObligation(ctx context.Context, sessionID, teamID
 	if existing != nil {
 		for _, id := range existing.ObligationIDs {
 			if id == obligationID {
+				// A duplicate park is also a recovery point. If the team
+				// reached terminal state before an earlier projection could
+				// observe the durable suspension, re-run the settlement check
+				// instead of preserving a missed wake.
+				_ = loop.agent.projectTurnSuspension(ctx, existing)
 				return
 			}
 		}
@@ -9116,6 +9127,7 @@ func (loop *ReActLoop) parkTeamObligation(ctx context.Context, sessionID, teamID
 		loop.agent.reportSuspensionDegraded(ctx, sessionID, "team parked-state write failed: "+err.Error())
 		return
 	}
+	_ = loop.agent.projectTurnSuspension(ctx, record)
 	// §6.8 / G3 edge semantics: announce every FRESH park epoch (no record, or
 	// the previous episode already settled) so each wait has its own
 	// turn.suspended edge; same-episode appends stay silent. A read failure
@@ -9256,6 +9268,10 @@ func (loop *ReActLoop) parkBackgroundJobObligation(ctx context.Context, sessionI
 	if existing != nil {
 		for _, id := range existing.ObligationIDs {
 			if id == obligationID {
+				// A duplicate park is also a recovery point. Reconcile the
+				// already durable row in case the job terminalized before the
+				// first projection attempt.
+				_ = loop.agent.projectTurnSuspension(ctx, existing)
 				return
 			}
 		}
@@ -9273,6 +9289,7 @@ func (loop *ReActLoop) parkBackgroundJobObligation(ctx context.Context, sessionI
 		loop.agent.reportSuspensionDegraded(ctx, sessionID, "background job parked-state write failed: "+err.Error())
 		return
 	}
+	_ = loop.agent.projectTurnSuspension(ctx, record)
 	if !freshEpoch {
 		return
 	}

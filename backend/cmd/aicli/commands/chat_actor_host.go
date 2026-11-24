@@ -2478,6 +2478,11 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 		}
 	}
 	apiAgent.SetBatchLifecycleProjector(localSubagentBatchLifecycleProjector(host))
+	// A delegated worker may finish before parkBackgroundTurn persists the
+	// parent suspension. Reconcile immediately after every successful park so
+	// the normal durable wake consumer can resume the parent without waiting
+	// for the periodic sweep.
+	apiAgent.SetTurnSuspensionProjector(host.reconcileParkedTurnSettlement)
 	// P1-4/H12：并发上限透传（过去只透传 Routing，导致每个 background batch
 	// 各自拿到默认 4 路窗口 → 实际并发 4×N）。每批上限 = agents.maxConcurrent
 	//（默认 4，与调度器内建默认一致）；进程级上限 = agents.maxThreads（>0 时

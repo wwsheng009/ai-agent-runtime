@@ -868,8 +868,8 @@ func TestResumeClaimModelTurnIDPrefersLogicalTurn(t *testing.T) {
 
 // TestResumeAdmissionRenewsClaimBeforeRecovery proves the lease heartbeat is a
 // real fence: a long-running delivery that refreshes claimed_at must not be
-// recovered as stale, and the original Version must remain usable for the
-// eventual submitted transition.
+// recovered as stale, the old version cannot complete a terminal transition,
+// and the renewed version is the only token that can submit the claim.
 func TestResumeAdmissionRenewsClaimBeforeRecovery(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t, "admit-claim-renew")
@@ -890,9 +890,10 @@ func TestResumeAdmissionRenewsClaimBeforeRecovery(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, won)
 
-	renewed, err := service.RenewClaim(ctx, claim)
+	renewed, ok, err := service.RenewClaim(ctx, claim)
 	require.NoError(t, err)
-	require.True(t, renewed)
+	require.True(t, ok)
+	require.Equal(t, claim.Version+1, renewed.Version)
 
 	recovered, err := service.RecoverStaleClaims(ctx)
 	require.NoError(t, err)
@@ -902,17 +903,35 @@ func TestResumeAdmissionRenewsClaimBeforeRecovery(t *testing.T) {
 	require.NotNil(t, stored)
 	require.Equal(t, ResumeClaimStateClaimed, stored.State)
 	require.WithinDuration(t, now, stored.ClaimedAt, time.Millisecond)
-	require.Equal(t, claim.Version, stored.Version, "renewal must not invalidate the holder's CAS token")
+	require.Equal(t, renewed.Version, stored.Version)
 
-	require.NoError(t, service.MarkSubmitted(ctx, claim, "turn-renew-model"))
+	recoveredByStaleHolder, err := store.MarkResumeRecovered(
+		ctx,
+		claim.ClaimKey,
+		"stale-recovery",
+		ResumeClaimRecoverySubmitted,
+		now,
+		claim.Version,
+	)
+	require.NoError(t, err)
+	require.False(t, recoveredByStaleHolder, "recovery with an old fencing version must be rejected")
+	require.ErrorIs(t, service.MarkSubmitted(ctx, claim, "turn-renew-model"), ErrResumeClaimFenceLost)
+	stored, err = store.GetResumeClaim(ctx, claim.ClaimKey)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	require.Equal(t, ResumeClaimStateClaimed, stored.State, "the old holder must not submit after renewal")
+	require.Equal(t, renewed.Version, stored.Version)
+
+	require.NoError(t, service.MarkSubmitted(ctx, renewed, "turn-renew-model"))
 	stored, err = store.GetResumeClaim(ctx, claim.ClaimKey)
 	require.NoError(t, err)
 	require.NotNil(t, stored)
 	require.Equal(t, ResumeClaimStateSubmitted, stored.State)
+	require.Equal(t, "turn-renew-model", stored.ModelTurnID)
 
-	renewed, err = service.RenewClaim(ctx, claim)
+	_, ok, err = service.RenewClaim(ctx, renewed)
 	require.NoError(t, err)
-	require.False(t, renewed, "a submitted claim can no longer be renewed")
+	require.False(t, ok, "a submitted claim can no longer be renewed")
 }
 
 func TestResumeAdmissionPrunesTerminalClaimsOnly(t *testing.T) {

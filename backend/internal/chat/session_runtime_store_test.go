@@ -507,6 +507,64 @@ func TestSQLiteRuntimeStorePersistsSuspendedTurnID(t *testing.T) {
 	require.Empty(t, loaded.SuspendedTurnID)
 }
 
+func TestSQLiteRuntimeStorePersistsTurnLifecycleAcrossReopen(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "runtime-turn-lifecycle.sqlite")
+	store, err := NewSQLiteRuntimeStore(&RuntimeStoreConfig{Path: dbPath})
+	require.NoError(t, err)
+
+	state := &RuntimeState{
+		SessionID:          "session-turn-lifecycle",
+		Status:             SessionIdle,
+		CurrentTurnID:      "turn-current",
+		CurrentEpisodeID:   "episode-current",
+		SuspendedTurnID:    "turn-parked",
+		SuspendedEpisodeID: "episode-parked",
+		TurnPhase:          ParentTurnPhaseParked,
+		FinalizedTurnID:    "turn-finalized",
+		FinalizedEpisodeID: "episode-finalized",
+		UpdatedAt:          time.Date(2026, 11, 23, 12, 0, 0, 0, time.UTC),
+	}
+	require.NoError(t, store.SaveState(ctx, state))
+
+	// Confirm the additive migration created every authority column before
+	// closing the first process; this intentionally uses only the test database.
+	rows, err := store.db.QueryContext(ctx, `PRAGMA table_info(session_runtime_state)`)
+	require.NoError(t, err)
+	columns := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull, pk int
+		var defaultValue sql.NullString
+		require.NoError(t, rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk))
+		columns[name] = true
+	}
+	require.NoError(t, rows.Err())
+	require.NoError(t, rows.Close())
+	for _, name := range []string{
+		"current_episode_id", "suspended_episode_id", "turn_phase",
+		"finalized_turn_id", "finalized_episode_id",
+	} {
+		require.True(t, columns[name], "runtime migration must add %s", name)
+	}
+	require.NoError(t, store.Close())
+
+	reopened, err := NewSQLiteRuntimeStore(&RuntimeStoreConfig{Path: dbPath})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = reopened.Close() })
+	loaded, err := reopened.LoadState(ctx, state.SessionID)
+	require.NoError(t, err)
+	require.NotNil(t, loaded)
+	require.Equal(t, state.CurrentTurnID, loaded.CurrentTurnID)
+	require.Equal(t, state.CurrentEpisodeID, loaded.CurrentEpisodeID)
+	require.Equal(t, state.SuspendedTurnID, loaded.SuspendedTurnID)
+	require.Equal(t, state.SuspendedEpisodeID, loaded.SuspendedEpisodeID)
+	require.Equal(t, state.TurnPhase, loaded.TurnPhase)
+	require.Equal(t, state.FinalizedTurnID, loaded.FinalizedTurnID)
+	require.Equal(t, state.FinalizedEpisodeID, loaded.FinalizedEpisodeID)
+}
+
 func TestSQLiteRuntimeStorePersistsAmbientRunMeta(t *testing.T) {
 	store, err := NewSQLiteRuntimeStore(&RuntimeStoreConfig{
 		DSN: "file:runtime-store-ambient-run-meta-test?mode=memory&cache=shared",

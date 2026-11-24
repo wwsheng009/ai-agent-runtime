@@ -2314,8 +2314,10 @@ func (s *SQLiteRuntimeStore) LoadStateStatus(ctx context.Context, sessionID stri
 		return nil, err
 	}
 	row := s.readQueryer().QueryRowContext(ctx, `
-		SELECT session_id, status, current_turn_id, current_checkpoint_id,
-		       suspended_turn_id, last_run_terminal_reason, head_offset, updated_at
+		SELECT session_id, status, current_turn_id, current_episode_id,
+		       current_checkpoint_id, suspended_turn_id, suspended_episode_id,
+		       turn_phase, finalized_turn_id, finalized_episode_id,
+		       last_run_terminal_reason, head_offset, updated_at
 		FROM session_runtime_state
 		WHERE session_id = ?
 	`, sessionID)
@@ -2324,8 +2326,13 @@ func (s *SQLiteRuntimeStore) LoadStateStatus(ctx context.Context, sessionID stri
 		state                RuntimeState
 		statusRaw            string
 		currentTurnIDRaw     sql.NullString
+		currentEpisodeIDRaw  sql.NullString
 		currentCheckpointRaw sql.NullString
 		suspendedTurnIDRaw   sql.NullString
+		suspendedEpisodeRaw  sql.NullString
+		turnPhaseRaw         sql.NullString
+		finalizedTurnRaw     sql.NullString
+		finalizedEpisodeRaw  sql.NullString
 		lastRunReasonRaw     sql.NullString
 		updatedAtRaw         string
 	)
@@ -2333,8 +2340,13 @@ func (s *SQLiteRuntimeStore) LoadStateStatus(ctx context.Context, sessionID stri
 		&state.SessionID,
 		&statusRaw,
 		&currentTurnIDRaw,
+		&currentEpisodeIDRaw,
 		&currentCheckpointRaw,
 		&suspendedTurnIDRaw,
+		&suspendedEpisodeRaw,
+		&turnPhaseRaw,
+		&finalizedTurnRaw,
+		&finalizedEpisodeRaw,
 		&lastRunReasonRaw,
 		&state.HeadOffset,
 		&updatedAtRaw,
@@ -2348,11 +2360,26 @@ func (s *SQLiteRuntimeStore) LoadStateStatus(ctx context.Context, sessionID stri
 	if currentTurnIDRaw.Valid {
 		state.CurrentTurnID = currentTurnIDRaw.String
 	}
+	if currentEpisodeIDRaw.Valid {
+		state.CurrentEpisodeID = currentEpisodeIDRaw.String
+	}
 	if currentCheckpointRaw.Valid {
 		state.CurrentCheckpointID = currentCheckpointRaw.String
 	}
 	if suspendedTurnIDRaw.Valid {
 		state.SuspendedTurnID = suspendedTurnIDRaw.String
+	}
+	if suspendedEpisodeRaw.Valid {
+		state.SuspendedEpisodeID = suspendedEpisodeRaw.String
+	}
+	if turnPhaseRaw.Valid {
+		state.TurnPhase = ParentTurnPhase(turnPhaseRaw.String)
+	}
+	if finalizedTurnRaw.Valid {
+		state.FinalizedTurnID = finalizedTurnRaw.String
+	}
+	if finalizedEpisodeRaw.Valid {
+		state.FinalizedEpisodeID = finalizedEpisodeRaw.String
 	}
 	if lastRunReasonRaw.Valid {
 		state.LastRunTerminalReason = lastRunReasonRaw.String
@@ -2380,7 +2407,9 @@ func (s *SQLiteRuntimeStore) LoadState(ctx context.Context, sessionID string) (*
 		return nil, err
 	}
 	row := s.readQueryer().QueryRowContext(ctx, `
-		SELECT session_id, status, current_turn_id, current_checkpoint_id, suspended_turn_id, current_run_meta_json, ambient_run_meta_json, stable_tool_surface_json, frozen_turn_tools_json,
+		SELECT session_id, status, current_turn_id, current_episode_id, current_checkpoint_id, suspended_turn_id, suspended_episode_id,
+		       turn_phase, finalized_turn_id, finalized_episode_id,
+		       current_run_meta_json, ambient_run_meta_json, stable_tool_surface_json, frozen_turn_tools_json,
 		       stable_tool_surface_ref,
 		       pending_tool_json, pending_approval_json, pending_question_json, last_run_terminal_reason, head_offset, active_job_ids_json, updated_at
 		FROM session_runtime_state
@@ -2401,16 +2430,26 @@ func (s *SQLiteRuntimeStore) LoadState(ctx context.Context, sessionID string) (*
 		activeJobsRaw        []byte
 		updatedAtRaw         string
 		currentTurnIDRaw     sql.NullString
+		currentEpisodeIDRaw  sql.NullString
 		currentCheckpointRaw sql.NullString
 		suspendedTurnIDRaw   sql.NullString
+		suspendedEpisodeRaw  sql.NullString
+		turnPhaseRaw         sql.NullString
+		finalizedTurnRaw     sql.NullString
+		finalizedEpisodeRaw  sql.NullString
 		stableToolSurfaceRef sql.NullString
 	)
 	if err := row.Scan(
 		&state.SessionID,
 		&statusRaw,
 		&currentTurnIDRaw,
+		&currentEpisodeIDRaw,
 		&currentCheckpointRaw,
 		&suspendedTurnIDRaw,
+		&suspendedEpisodeRaw,
+		&turnPhaseRaw,
+		&finalizedTurnRaw,
+		&finalizedEpisodeRaw,
 		&currentRunMetaRaw,
 		&ambientRunMetaRaw,
 		&stableToolSurfaceRaw,
@@ -2433,11 +2472,26 @@ func (s *SQLiteRuntimeStore) LoadState(ctx context.Context, sessionID string) (*
 	if currentTurnIDRaw.Valid {
 		state.CurrentTurnID = currentTurnIDRaw.String
 	}
+	if currentEpisodeIDRaw.Valid {
+		state.CurrentEpisodeID = currentEpisodeIDRaw.String
+	}
 	if currentCheckpointRaw.Valid {
 		state.CurrentCheckpointID = currentCheckpointRaw.String
 	}
 	if suspendedTurnIDRaw.Valid {
 		state.SuspendedTurnID = suspendedTurnIDRaw.String
+	}
+	if suspendedEpisodeRaw.Valid {
+		state.SuspendedEpisodeID = suspendedEpisodeRaw.String
+	}
+	if turnPhaseRaw.Valid {
+		state.TurnPhase = ParentTurnPhase(turnPhaseRaw.String)
+	}
+	if finalizedTurnRaw.Valid {
+		state.FinalizedTurnID = finalizedTurnRaw.String
+	}
+	if finalizedEpisodeRaw.Valid {
+		state.FinalizedEpisodeID = finalizedEpisodeRaw.String
 	}
 	if len(bytes.TrimSpace(currentRunMetaRaw)) > 0 {
 		var runMeta team.RunMeta
@@ -2623,15 +2677,22 @@ func (s *SQLiteRuntimeStore) SaveState(ctx context.Context, state *RuntimeState)
 
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO session_runtime_state (
-			session_id, status, current_turn_id, current_checkpoint_id, suspended_turn_id, current_run_meta_json, ambient_run_meta_json, stable_tool_surface_json,
+			session_id, status, current_turn_id, current_episode_id, current_checkpoint_id, suspended_turn_id, suspended_episode_id,
+			turn_phase, finalized_turn_id, finalized_episode_id,
+			current_run_meta_json, ambient_run_meta_json, stable_tool_surface_json,
 			frozen_turn_tools_json, pending_tool_json, pending_approval_json, pending_question_json, last_run_terminal_reason, head_offset, active_job_ids_json, updated_at,
 			stable_tool_surface_ref
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(session_id) DO UPDATE SET
 			status = excluded.status,
 			current_turn_id = excluded.current_turn_id,
+			current_episode_id = excluded.current_episode_id,
 			current_checkpoint_id = excluded.current_checkpoint_id,
 			suspended_turn_id = excluded.suspended_turn_id,
+			suspended_episode_id = excluded.suspended_episode_id,
+			turn_phase = excluded.turn_phase,
+			finalized_turn_id = excluded.finalized_turn_id,
+			finalized_episode_id = excluded.finalized_episode_id,
 			current_run_meta_json = excluded.current_run_meta_json,
 			ambient_run_meta_json = excluded.ambient_run_meta_json,
 			stable_tool_surface_json = excluded.stable_tool_surface_json,
@@ -2644,7 +2705,9 @@ func (s *SQLiteRuntimeStore) SaveState(ctx context.Context, state *RuntimeState)
 			head_offset = excluded.head_offset,
 			active_job_ids_json = excluded.active_job_ids_json,
 			updated_at = excluded.updated_at
-	`, state.SessionID, string(state.Status), nullIfEmpty(state.CurrentTurnID), nullIfEmpty(state.CurrentCheckpointID), nullIfEmpty(state.SuspendedTurnID),
+	`, state.SessionID, string(state.Status), nullIfEmpty(state.CurrentTurnID), nullIfEmpty(state.CurrentEpisodeID),
+		nullIfEmpty(state.CurrentCheckpointID), nullIfEmpty(state.SuspendedTurnID), nullIfEmpty(state.SuspendedEpisodeID),
+		string(state.TurnPhase), nullIfEmpty(state.FinalizedTurnID), nullIfEmpty(state.FinalizedEpisodeID),
 		nullIfEmptyBytes(currentRunMetaJSON), nullIfEmptyBytes(ambientRunMetaJSON), nullIfEmptyBytes(stableToolSurfaceJSON), nullIfEmptyBytes(frozenTurnToolsJSON), nullIfEmptyBytes(pendingToolJSON), nullIfEmptyBytes(pendingApprovalJSON), nullIfEmptyBytes(pendingQuestionJSON), nullIfEmpty(state.LastRunTerminalReason), state.HeadOffset, activeJobsJSON, state.UpdatedAt.Format(time.RFC3339Nano),
 		nullIfEmpty(stableToolSurfaceRef))
 	if err != nil {
@@ -5289,6 +5352,21 @@ func (s *SQLiteRuntimeStore) init(ctx context.Context) error {
 			Name:    "drop_redundant_session_events_index",
 			UpSQL: `
 				DROP INDEX IF EXISTS idx_session_events_session_seq;
+			`,
+		},
+		{
+			// v27：把逻辑 parent turn 的 episode、phase 和 finalized identity
+			// 纳入 runtime authority。旧库中的 NULL/空值保持兼容；新写入由
+			// SaveState 同一事务语义下原子 upsert，避免重启后只剩旧的
+			// session status 而丢失 parked/finalized resume 边界。
+			Version: 27,
+			Name:    "session_runtime_state_turn_lifecycle",
+			UpSQL: `
+				ALTER TABLE session_runtime_state ADD COLUMN current_episode_id TEXT;
+				ALTER TABLE session_runtime_state ADD COLUMN suspended_episode_id TEXT;
+				ALTER TABLE session_runtime_state ADD COLUMN turn_phase TEXT NOT NULL DEFAULT '';
+				ALTER TABLE session_runtime_state ADD COLUMN finalized_turn_id TEXT;
+				ALTER TABLE session_runtime_state ADD COLUMN finalized_episode_id TEXT;
 			`,
 		},
 	}

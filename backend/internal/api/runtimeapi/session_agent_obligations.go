@@ -146,6 +146,10 @@ func (c *sessionAgentController) parkAgentChildObligation(ctx context.Context, p
 	obligationID := subagentbatch.AgentSessionObligationID(childSessionID)
 	for _, existing := range record.ObligationIDs {
 		if existing == obligationID {
+			// A duplicate park request is also a recovery point: the child
+			// may have completed before the first completion projection saw
+			// the suspension row.
+			_ = c.handler.reconcileParkedTurnSettlement(ctx, record)
 			return
 		}
 	}
@@ -157,5 +161,11 @@ func (c *sessionAgentController) parkAgentChildObligation(ctx context.Context, p
 		record.ParkedAt = time.Now().UTC()
 	}
 	// A failed write keeps the turn unparked instead of failing the spawn.
-	_ = store.ParkTurnSuspension(ctx, record)
+	if err := store.ParkTurnSuspension(ctx, record); err != nil {
+		return
+	}
+	// Spawn/followup starts the child before this host-side park is persisted.
+	// Reconcile only after the durable write so a terminal child cannot leave
+	// the parent parked with no wake.
+	_ = c.handler.reconcileParkedTurnSettlement(ctx, record)
 }

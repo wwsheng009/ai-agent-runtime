@@ -55,23 +55,50 @@ type Store interface {
 	InsertWakePending(ctx context.Context, w WakePending) error
 	ListWakePending(ctx context.Context, filter WakeFilter) ([]WakePending, error)
 	ClaimWakePending(ctx context.Context, wakeID, claimedBy string, at time.Time) (bool, error)
+	// RenewWakePending advances the lease timestamp only for the current
+	// owner. It may keep an ordinary delivery or an accepted control-plane
+	// marker-repair claim alive; submitting/accepted rows are never eligible for
+	// ordinary prompt replay.
+	RenewWakePending(ctx context.Context, wakeIDs []string, claimedBy string, at, validAfter time.Time) (int64, error)
+	// ReleaseStaleWakePending returns expired ordinary claims and accepted
+	// returns ordinary claims to the pending queue. Delivery-fenced rows are
+	// deliberately excluded and require control-plane recovery rather than
+	// prompt replay.
+	ReleaseStaleWakePending(ctx context.Context, claimedBefore time.Time) (int64, error)
+	// ReleaseStaleAcceptedWakePending exposes expired accepted claims to the
+	// marker-repair path without clearing their no-replay fence. It must never
+	// make an accepted row eligible for model prompt delivery.
+	ReleaseStaleAcceptedWakePending(ctx context.Context, claimedBefore time.Time) (int64, error)
 	// ReleaseWakePending returns a claimed-but-not-delivered wake to the
 	// pending queue (plan C2-5 / A6): a resume deferred by the capacity gate
 	// must stay durable and keep its FIFO position instead of being dropped.
 	// Only the claim owner may release; a concurrent drainer's claim is left
-	// untouched. Reports whether a row was actually returned to pending.
+	// untouched. Ordinary wakes return to pending; accepted wakes may be
+	// released for marker-repair retry while their no-replay fence remains.
+	// Submitting rows are never released by this method. Reports whether a row
+	// was actually made available to the pending/control-plane queue.
 	ReleaseWakePending(ctx context.Context, wakeID, claimedBy string) (bool, error)
+	// ReleaseWakePendingOwned is the fenced form used by live workers. The
+	// claim must still be newer than validAfter; an expired owner cannot
+	// unclaim a successor's wake.
+	ReleaseWakePendingOwned(ctx context.Context, wakeID, claimedBy string, validAfter time.Time) (bool, error)
 	ResolveWakePending(ctx context.Context, wakeID string) error
+	// ResolveWakePendingOwned deletes only a claim held by claimedBy. A late
+	// worker that lost or expired its lease cannot delete a wake.
+	ResolveWakePendingOwned(ctx context.Context, wakeID, claimedBy string, validAfter time.Time) (bool, error)
 	// MarkWakeDeliverySubmitting creates a durable no-replay fence before the
 	// host acceptance boundary. A crash while submitting is ambiguous and may
 	// only be handled by control-plane recovery.
 	MarkWakeDeliverySubmitting(ctx context.Context, wakeIDs []string, retryMarker bool) error
+	MarkWakeDeliverySubmittingOwned(ctx context.Context, wakeIDs []string, claimedBy string, retryMarker bool, validAfter time.Time) error
 	// MarkWakeDeliveryRejected removes only a submitting fence after the host
 	// has explicitly reported that no prompt was accepted.
 	MarkWakeDeliveryRejected(ctx context.Context, wakeIDs []string) error
+	MarkWakeDeliveryRejectedOwned(ctx context.Context, wakeIDs []string, claimedBy string, validAfter time.Time) error
 	// MarkWakeDeliveryAccepted records the receipt boundary and releases the
 	// wake rows for idempotent marker/ledger recovery.
 	MarkWakeDeliveryAccepted(ctx context.Context, wakeIDs []string, retryMarker bool) error
+	MarkWakeDeliveryAcceptedOwned(ctx context.Context, wakeIDs []string, claimedBy string, retryMarker bool, validAfter time.Time) error
 	// ReleaseStaleSubmittingWakePending makes ambiguous submission rows
 	// available for control-plane recovery without clearing their no-replay
 	// fence.
@@ -83,6 +110,10 @@ type Store interface {
 	// MarkWakeDelivered records a successful delivery. Recording the same key
 	// twice must not error (the first delivery wins).
 	MarkWakeDelivered(ctx context.Context, d WakeDelivered) error
+	// CommitWakeConsumptionOwned atomically records delivery-ledger entries and
+	// deletes the corresponding wake rows while the caller's lease is valid.
+	// This prevents a stale owner from suppressing a successor via the ledger.
+	CommitWakeConsumptionOwned(ctx context.Context, wakes []WakePending, claimedBy string, validAfter time.Time, consumedAt time.Time, consumption, reason string) error
 	// PruneWakeDelivered deletes delivery-ledger rows older than the cutoff
 	// and reports how many were removed (retention, plan C4-2). A no-op is
 	// acceptable for stores without retention pressure.
@@ -97,11 +128,12 @@ type Store interface {
 	GetResumeClaim(ctx context.Context, claimKey string) (*ResumeClaim, error)
 	// MarkResumeSubmitted CAS-transitions claimed -> submitted.
 	MarkResumeSubmitted(ctx context.Context, claimKey, modelTurnID string, at time.Time, expectedVersion int64) (bool, error)
-	// RenewResumeClaim refreshes the lease timestamp of a live `claimed` row.
-	// It intentionally does not bump version: renewal is a heartbeat, not a
-	// state transition, so the holder's later MarkSubmitted/Release CAS remains
-	// valid. A row already submitted/released reports false.
-	RenewResumeClaim(ctx context.Context, claimKey string, at time.Time, expectedVersion int64) (bool, error)
+	// RenewResumeClaim refreshes the lease timestamp of a live `claimed` row and
+	// advances its fencing version. The returned claim carries the only token
+	// that may perform the next state transition; an old holder can no longer
+	// submit or release after a successful renewal. A row already
+	// submitted/released reports false.
+	RenewResumeClaim(ctx context.Context, claimKey string, at time.Time, expectedVersion int64) (ResumeClaim, bool, error)
 	// ReleaseResumeClaim CAS-transitions claimed -> released. A released claim
 	// may be reclaimed by a later settlement attempt.
 	ReleaseResumeClaim(ctx context.Context, claimKey string, expectedVersion int64) (bool, error)

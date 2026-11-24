@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -11,6 +12,10 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
 )
+
+// ErrResumeClaimFenceLost reports that a terminal claim transition used a
+// stale fencing version or observed a claim that is no longer live.
+var ErrResumeClaimFenceLost = errors.New("resume claim fencing token is no longer current")
 
 // ResumeAdmissionDecision is the host-neutral answer to "may this wake start a
 // model turn for the parent?". Only ResumeSameParkedTurn authorizes an
@@ -626,14 +631,20 @@ func (s *ResumeAdmissionService) MarkSubmitted(ctx context.Context, claim Resume
 	}
 	at := s.clock()
 	if s.claims != nil {
-		_, err := s.claims.MarkResumeSubmitted(ctx, claim.ClaimKey, modelTurnID, at, claim.Version)
-		return err
+		won, err := s.claims.MarkResumeSubmitted(ctx, claim.ClaimKey, modelTurnID, at, claim.Version)
+		if err != nil {
+			return err
+		}
+		if !won {
+			return ErrResumeClaimFenceLost
+		}
+		return nil
 	}
 	s.localMu.Lock()
 	defer s.localMu.Unlock()
 	stored := s.localClaims[claim.ClaimKey]
 	if stored.State != ResumeClaimStateClaimed || stored.Version != claim.Version {
-		return nil
+		return ErrResumeClaimFenceLost
 	}
 	stored.State = ResumeClaimStateSubmitted
 	stored.SubmittedAt = &at
@@ -674,12 +685,13 @@ func (s *ResumeAdmissionService) ClaimRenewInterval() time.Duration {
 }
 
 // RenewClaim refreshes the lease timestamp of a claimed settlement while its
-// delivery is still in flight. It is best-effort and intentionally does not
-// bump Version: the holder keeps its original CAS token for MarkSubmitted /
-// Release. A claim that already moved to submitted/released reports false.
-func (s *ResumeAdmissionService) RenewClaim(ctx context.Context, claim ResumeClaim) (bool, error) {
+// delivery is still in flight. Renewal advances the fencing version and returns
+// the new claim token; callers must use that returned claim for every later
+// MarkSubmitted/Release operation. A claim that already moved to
+// submitted/released reports false.
+func (s *ResumeAdmissionService) RenewClaim(ctx context.Context, claim ResumeClaim) (ResumeClaim, bool, error) {
 	if s == nil {
-		return false, nil
+		return ResumeClaim{}, false, nil
 	}
 	at := s.clock()
 	if s.claims != nil {
@@ -689,11 +701,12 @@ func (s *ResumeAdmissionService) RenewClaim(ctx context.Context, claim ResumeCla
 	defer s.localMu.Unlock()
 	stored, ok := s.localClaims[claim.ClaimKey]
 	if !ok || stored.State != ResumeClaimStateClaimed || stored.Version != claim.Version {
-		return false, nil
+		return ResumeClaim{}, false, nil
 	}
 	stored.ClaimedAt = at
+	stored.Version++
 	s.localClaims[claim.ClaimKey] = stored
-	return true, nil
+	return stored, true, nil
 }
 
 func (s *ResumeAdmissionService) Release(ctx context.Context, claim ResumeClaim) error {
@@ -701,14 +714,20 @@ func (s *ResumeAdmissionService) Release(ctx context.Context, claim ResumeClaim)
 		return nil
 	}
 	if s.claims != nil {
-		_, err := s.claims.ReleaseResumeClaim(ctx, claim.ClaimKey, claim.Version)
-		return err
+		won, err := s.claims.ReleaseResumeClaim(ctx, claim.ClaimKey, claim.Version)
+		if err != nil {
+			return err
+		}
+		if !won {
+			return ErrResumeClaimFenceLost
+		}
+		return nil
 	}
 	s.localMu.Lock()
 	defer s.localMu.Unlock()
 	stored := s.localClaims[claim.ClaimKey]
 	if stored.State != ResumeClaimStateClaimed || stored.Version != claim.Version {
-		return nil
+		return ErrResumeClaimFenceLost
 	}
 	stored.State = ResumeClaimStateReleased
 	stored.Version++

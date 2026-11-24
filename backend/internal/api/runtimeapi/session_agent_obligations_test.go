@@ -277,3 +277,65 @@ func TestAPIProjectAgentCompletionWakesSettledParkedTurn(t *testing.T) {
 	require.NoError(t, controller.wakeSupervisedParent(ctx, parent.ID, parent.ID))
 	require.Equal(t, 1, deliveries, "下一次 runnable 迁移必须恰好投递一次结算恢复")
 }
+
+// TestAPIParkAgentChildObligationRepairsTerminalBeforePark pins the API
+// dispatch-before-park race. The queued child can publish its terminal
+// lifecycle row before the parent-side obligation write. Once the suspension
+// row is durable, the park path must re-run the strict settlement predicate and
+// use the ordinary wake consumer; it must not wait for a sweep or start a turn
+// outside the consumer.
+func TestAPIParkAgentChildObligationRepairsTerminalBeforePark(t *testing.T) {
+	ctx := context.Background()
+	controller, sessionManager := newAPIAgentObligationFixture(t)
+	parent, err := sessionManager.Create(ctx, "user-api-terminal-before-park")
+	require.NoError(t, err)
+	child, err := sessionManager.Create(ctx, "user-api-terminal-before-park-child")
+	require.NoError(t, err)
+
+	handler := controller.handler
+	scheduler := supervision.NewWakeScheduler(handler.getSupervisionStore(), supervision.WakeSchedulerConfig{})
+	handler.SetSupervisionWakeScheduler(scheduler)
+	deliveries := 0
+	handler.supervisionWakeMu.Lock()
+	handler.supervisionWake = &supervision.WakeConsumer{
+		Wakes: scheduler,
+		Runnable: func(context.Context, string, string, string) bool {
+			return true
+		},
+		Deliver: func(context.Context, string, string, *supervision.Digest, []string) error {
+			deliveries++
+			return nil
+		},
+	}
+	handler.supervisionWakeMu.Unlock()
+
+	require.NoError(t, handler.getSessionRuntimeStore().SaveState(ctx, &chat.RuntimeState{
+		SessionID:     parent.ID,
+		Status:        chat.SessionIdle,
+		CurrentTurnID: "turn-api-terminal-before-park",
+	}))
+
+	// Completion arrives before the parent has a suspension row, so there is
+	// deliberately no wake target yet.
+	controller.projectAgentCompletion(ctx, parent.ID, child.ID, "completed", "agent.completed")
+	pending, err := handler.getSupervisionStore().ListWakePending(ctx, supervision.WakeFilter{
+		TargetParentSessionID: parent.ID,
+		UnclaimedOnly:         true,
+	})
+	require.NoError(t, err)
+	require.Empty(t, pending)
+
+	controller.parkAgentChildObligation(
+		agent.WithTurnID(ctx, "turn-api-terminal-before-park"),
+		parent.ID,
+		child.ID,
+	)
+
+	require.Equal(t, 1, deliveries, "post-park reconciliation must use the normal wake consumer")
+	pending, err = handler.getSupervisionStore().ListWakePending(ctx, supervision.WakeFilter{
+		TargetParentSessionID: parent.ID,
+		UnclaimedOnly:         true,
+	})
+	require.NoError(t, err)
+	require.Empty(t, pending, "the repaired wake must be consumed exactly once")
+}

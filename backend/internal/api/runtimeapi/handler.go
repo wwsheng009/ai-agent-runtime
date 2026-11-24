@@ -5080,6 +5080,10 @@ func (h *Handler) newAPIAgentWithRuntime(cfg *agent.Config, runtime *agentRuntim
 	if h.getSupervisionStore() != nil {
 		apiAgent.SetBatchLifecycleProjector(h.apiBatchLifecycleProjector())
 	}
+	// A delegated worker may finish before the loop persists the parent
+	// suspension. Reconcile immediately after every successful park so normal
+	// wake admission, rather than the periodic recovery sweep, resumes it.
+	apiAgent.SetTurnSuspensionProjector(h.reconcileParkedTurnSettlement)
 	// P0-B/P2-D：把宿主级共享 batch store 注入每个 API agent。没有这一步，
 	// agent 会惰性创建只属于自己的内存 store，父会话的 progress 投影永远读不到
 	// "batch 进行到哪了"。顺序必须在 SetBatchLifecycleProjector 之后：

@@ -58,6 +58,28 @@ func TestParkBackgroundTurnPreservesUnreadTerminalChild(t *testing.T) {
 	}
 }
 
+// TestParkBackgroundTurnProjectsOnlyAfterDurableWrite guards the
+// terminal-before-park repair hook. The callback must observe the suspension
+// row already persisted; otherwise a terminal batch can still race the park
+// and leave the parent without a wake target.
+func TestParkBackgroundTurnProjectsOnlyAfterDurableWrite(t *testing.T) {
+	ctx, store, loop := newParkMergeHarness(t)
+	batch := seedParkBatch(t, store, "sess-1", "batch-terminal-before-park", "task-terminal-before-park", subagentbatch.BatchCompleted)
+
+	var calls int
+	loop.agent.SetTurnSuspensionProjector(func(_ context.Context, record *subagentbatch.TurnSuspension) error {
+		calls++
+		persisted, found, err := store.GetTurnSuspension(ctx, record.SessionID, record.TurnID)
+		require.NoError(t, err)
+		require.True(t, found)
+		require.Equal(t, record.ObligationIDs, persisted.ObligationIDs)
+		return nil
+	})
+
+	loop.parkBackgroundTurn(ctx, batch, "sess-1")
+	require.Equal(t, 1, calls, "a successful durable park must invoke the repair hook once")
+}
+
 // Reproduce terminal batch + direct-child obligations, an already delivered
 // settlement wake, and results_consumed=0. A result-bearing wait must let the
 // next normal run-end settle without another child event or manual DB repair.

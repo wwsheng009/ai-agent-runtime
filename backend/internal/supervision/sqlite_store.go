@@ -1401,10 +1401,19 @@ func (s *SQLiteSupervisionStore) ClaimWakePending(ctx context.Context, wakeID, c
 	if err != nil {
 		return false, err
 	}
+	wakeID = strings.TrimSpace(wakeID)
+	claimedBy = strings.TrimSpace(claimedBy)
+	if wakeID == "" || claimedBy == "" {
+		return false, nil
+	}
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
 	result, err := db.ExecContext(ctx, `
 		UPDATE supervision_wake_pending
 		SET claimed_at = ?, claimed_by = ?
-		WHERE wake_id = ? AND claimed_at IS NULL
+			WHERE wake_id = ? AND claimed_at IS NULL
+			AND COALESCE(delivery_state, '') IN ('', 'accepted')
 	`, formatSupervisionTime(at), claimedBy, wakeID)
 	if err != nil {
 		return false, fmt.Errorf("claim wake pending: %w", err)
@@ -1416,20 +1425,138 @@ func (s *SQLiteSupervisionStore) ClaimWakePending(ctx context.Context, wakeID, c
 	return affected == 1, nil
 }
 
-// ReleaseWakePending returns a claim to the pending queue without deleting the
-// row (plan C2-5 / A6 deferral). The claimed_by guard keeps a concurrent
-// drainer's claim intact: only the owner can un-claim, so a late release can
-// never resurrect a row another drainer is about to deliver.
-func (s *SQLiteSupervisionStore) ReleaseWakePending(ctx context.Context, wakeID, claimedBy string) (bool, error) {
+func (s *SQLiteSupervisionStore) RenewWakePending(ctx context.Context, wakeIDs []string, claimedBy string, at, validAfter time.Time) (int64, error) {
 	db, err := s.dbOrErr()
 	if err != nil {
-		return false, err
+		return 0, err
+	}
+	claimedBy = strings.TrimSpace(claimedBy)
+	if claimedBy == "" || validAfter.IsZero() {
+		return 0, nil
+	}
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+	ids := uniqueWakeIDs(wakeIDs)
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(ids)), ",")
+	args := make([]interface{}, 0, len(ids)+3)
+	args = append(args, formatSupervisionTime(at))
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	args = append(args, claimedBy)
+	args = append(args, formatSupervisionTime(validAfter))
+	result, err := db.ExecContext(ctx, `
+		UPDATE supervision_wake_pending
+		SET claimed_at = ?
+		WHERE wake_id IN (`+placeholders+`)
+			AND claimed_by = ?
+			AND claimed_at IS NOT NULL
+			AND claimed_at >= ?
+			AND COALESCE(delivery_state, '') IN ('', 'submitting', 'accepted')
+	`, args...)
+	if err != nil {
+		return 0, fmt.Errorf("renew wake pending: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return affected, nil
+}
+
+func (s *SQLiteSupervisionStore) ReleaseStaleWakePending(ctx context.Context, claimedBefore time.Time) (int64, error) {
+	db, err := s.dbOrErr()
+	if err != nil {
+		return 0, err
+	}
+	if claimedBefore.IsZero() {
+		return 0, nil
 	}
 	result, err := db.ExecContext(ctx, `
 		UPDATE supervision_wake_pending
 		SET claimed_at = NULL, claimed_by = ''
-		WHERE wake_id = ? AND claimed_at IS NOT NULL AND claimed_by = ?
-	`, wakeID, claimedBy)
+		WHERE claimed_at IS NOT NULL
+			AND claimed_at < ?
+			AND COALESCE(delivery_state, '') = ''
+	`, formatSupervisionTime(claimedBefore))
+	if err != nil {
+		return 0, fmt.Errorf("release stale wake pending: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return affected, nil
+}
+
+func (s *SQLiteSupervisionStore) ReleaseStaleAcceptedWakePending(ctx context.Context, claimedBefore time.Time) (int64, error) {
+	db, err := s.dbOrErr()
+	if err != nil {
+		return 0, err
+	}
+	if claimedBefore.IsZero() {
+		return 0, nil
+	}
+	result, err := db.ExecContext(ctx, `
+		UPDATE supervision_wake_pending
+		SET claimed_at = NULL, claimed_by = ''
+		WHERE claimed_at IS NOT NULL
+			AND claimed_at < ?
+			AND delivery_state = 'accepted'
+	`, formatSupervisionTime(claimedBefore))
+	if err != nil {
+		return 0, fmt.Errorf("release stale accepted wakes: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return affected, nil
+}
+
+// ReleaseWakePending returns an ordinary claim to the pending queue without
+// deleting the row (plan C2-5 / A6 deferral). It also releases an accepted row
+// for control-plane marker-repair retry while preserving delivery_state. The
+// claimed_by guard keeps a concurrent drainer's claim intact: only the owner
+// can un-claim, so a late release can never affect a successor claim. A
+// submitting row remains fenced and is never released here.
+func (s *SQLiteSupervisionStore) ReleaseWakePending(ctx context.Context, wakeID, claimedBy string) (bool, error) {
+	return s.releaseWakePending(ctx, wakeID, claimedBy, time.Time{})
+}
+
+func (s *SQLiteSupervisionStore) ReleaseWakePendingOwned(ctx context.Context, wakeID, claimedBy string, validAfter time.Time) (bool, error) {
+	if validAfter.IsZero() {
+		return false, nil
+	}
+	return s.releaseWakePending(ctx, wakeID, claimedBy, validAfter)
+}
+
+func (s *SQLiteSupervisionStore) releaseWakePending(ctx context.Context, wakeID, claimedBy string, validAfter time.Time) (bool, error) {
+	db, err := s.dbOrErr()
+	if err != nil {
+		return false, err
+	}
+	wakeID = strings.TrimSpace(wakeID)
+	claimedBy = strings.TrimSpace(claimedBy)
+	if wakeID == "" || claimedBy == "" {
+		return false, nil
+	}
+	where := "wake_id = ? AND claimed_at IS NOT NULL AND claimed_by = ?"
+	args := []interface{}{wakeID, claimedBy}
+	if !validAfter.IsZero() {
+		where += " AND claimed_at >= ?"
+		args = append(args, formatSupervisionTime(validAfter))
+	}
+	result, err := db.ExecContext(ctx, `
+		UPDATE supervision_wake_pending
+		SET claimed_at = NULL, claimed_by = ''
+		WHERE `+where+`
+			AND COALESCE(delivery_state, '') IN ('', 'accepted')
+	`, args...)
 	if err != nil {
 		return false, fmt.Errorf("release wake pending: %w", err)
 	}
@@ -1451,20 +1578,66 @@ func (s *SQLiteSupervisionStore) ResolveWakePending(ctx context.Context, wakeID 
 	return nil
 }
 
+func (s *SQLiteSupervisionStore) ResolveWakePendingOwned(ctx context.Context, wakeID, claimedBy string, validAfter time.Time) (bool, error) {
+	db, err := s.dbOrErr()
+	if err != nil {
+		return false, err
+	}
+	wakeID = strings.TrimSpace(wakeID)
+	claimedBy = strings.TrimSpace(claimedBy)
+	if wakeID == "" || claimedBy == "" || validAfter.IsZero() {
+		return false, nil
+	}
+	result, err := db.ExecContext(ctx, `
+		DELETE FROM supervision_wake_pending
+		WHERE wake_id = ? AND claimed_by = ? AND claimed_at >= ?
+			AND COALESCE(delivery_state, '') IN ('', 'accepted')
+	`, wakeID, claimedBy, formatSupervisionTime(validAfter))
+	if err != nil {
+		return false, fmt.Errorf("resolve owned wake pending: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected == 1, nil
+}
+
 // MarkWakeDeliverySubmitting durably closes the replay window before crossing
 // the host acceptance boundary. On restart, a submitting row is ambiguous and
 // must follow control-plane recovery rather than another prompt submission.
 func (s *SQLiteSupervisionStore) MarkWakeDeliverySubmitting(ctx context.Context, wakeIDs []string, retryMarker bool) error {
-	return s.updateWakeDeliveryFence(ctx, wakeIDs, WakeDeliveryStateSubmitting, retryMarker)
+	return s.updateWakeDeliveryFence(ctx, wakeIDs, "", WakeDeliveryStateSubmitting, retryMarker, time.Time{})
+}
+
+func (s *SQLiteSupervisionStore) MarkWakeDeliverySubmittingOwned(ctx context.Context, wakeIDs []string, claimedBy string, retryMarker bool, validAfter time.Time) error {
+	if strings.TrimSpace(claimedBy) == "" {
+		return ErrWakeClaimFenceLost
+	}
+	return s.updateWakeDeliveryFence(ctx, wakeIDs, claimedBy, WakeDeliveryStateSubmitting, retryMarker, validAfter)
 }
 
 // MarkWakeDeliveryRejected clears a submitting fence only when the host
 // explicitly confirmed that it accepted no prompt. Accepted/ambiguous rows
 // cannot be made eligible for normal prompt delivery again.
 func (s *SQLiteSupervisionStore) MarkWakeDeliveryRejected(ctx context.Context, wakeIDs []string) error {
+	return s.markWakeDeliveryRejected(ctx, wakeIDs, "", time.Time{})
+}
+
+func (s *SQLiteSupervisionStore) MarkWakeDeliveryRejectedOwned(ctx context.Context, wakeIDs []string, claimedBy string, validAfter time.Time) error {
+	if strings.TrimSpace(claimedBy) == "" {
+		return ErrWakeClaimFenceLost
+	}
+	return s.markWakeDeliveryRejected(ctx, wakeIDs, claimedBy, validAfter)
+}
+
+func (s *SQLiteSupervisionStore) markWakeDeliveryRejected(ctx context.Context, wakeIDs []string, claimedBy string, validAfter time.Time) error {
 	db, err := s.dbOrErr()
 	if err != nil {
 		return err
+	}
+	if strings.TrimSpace(claimedBy) != "" && validAfter.IsZero() {
+		return ErrWakeClaimFenceLost
 	}
 	ids := uniqueWakeIDs(wakeIDs)
 	if len(ids) == 0 {
@@ -1475,19 +1648,34 @@ func (s *SQLiteSupervisionStore) MarkWakeDeliveryRejected(ctx context.Context, w
 	for _, id := range ids {
 		args = append(args, id)
 	}
+	where := "delivery_state = 'submitting' AND wake_id IN (" + placeholders + ")"
+	set := "delivery_state = '', marker_repair_required = 0"
+	if owner := strings.TrimSpace(claimedBy); owner != "" {
+		where += " AND claimed_by = ? AND claimed_at IS NOT NULL AND claimed_at >= ?"
+		args = append(args, owner, formatSupervisionTime(validAfter))
+	} else {
+		set += ", claimed_at = NULL, claimed_by = ''"
+	}
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin rejected wake delivery: %w", err)
 	}
 	defer tx.Rollback()
-	_, err = tx.ExecContext(ctx, `
+	result, err := tx.ExecContext(ctx, `
 		UPDATE supervision_wake_pending
-		SET delivery_state = '', marker_repair_required = 0,
-			claimed_at = NULL, claimed_by = ''
-		WHERE delivery_state = 'submitting' AND wake_id IN (`+placeholders+`)
-	`, args...)
+		SET `+set+`
+		WHERE `+where, args...)
 	if err != nil {
 		return fmt.Errorf("mark wake delivery rejected: %w", err)
+	}
+	if owner := strings.TrimSpace(claimedBy); owner != "" {
+		affected, rowsErr := result.RowsAffected()
+		if rowsErr != nil {
+			return rowsErr
+		}
+		if affected != int64(len(ids)) {
+			return ErrWakeClaimFenceLost
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit rejected wake delivery: %w", err)
@@ -1499,7 +1687,14 @@ func (s *SQLiteSupervisionStore) MarkWakeDeliveryRejected(ctx context.Context, w
 // accepted state is monotonic: retries may add a marker-repair obligation, but
 // neither accepted nor submitting rows can return to normal prompt delivery.
 func (s *SQLiteSupervisionStore) MarkWakeDeliveryAccepted(ctx context.Context, wakeIDs []string, retryMarker bool) error {
-	return s.updateWakeDeliveryFence(ctx, wakeIDs, WakeDeliveryStateAccepted, retryMarker)
+	return s.updateWakeDeliveryFence(ctx, wakeIDs, "", WakeDeliveryStateAccepted, retryMarker, time.Time{})
+}
+
+func (s *SQLiteSupervisionStore) MarkWakeDeliveryAcceptedOwned(ctx context.Context, wakeIDs []string, claimedBy string, retryMarker bool, validAfter time.Time) error {
+	if strings.TrimSpace(claimedBy) == "" {
+		return ErrWakeClaimFenceLost
+	}
+	return s.updateWakeDeliveryFence(ctx, wakeIDs, claimedBy, WakeDeliveryStateAccepted, retryMarker, validAfter)
 }
 
 // ReleaseStaleSubmittingWakePending clears stale claims without clearing the
@@ -1525,10 +1720,13 @@ func (s *SQLiteSupervisionStore) ReleaseStaleSubmittingWakePending(ctx context.C
 	return affected, nil
 }
 
-func (s *SQLiteSupervisionStore) updateWakeDeliveryFence(ctx context.Context, wakeIDs []string, state string, retryMarker bool) error {
+func (s *SQLiteSupervisionStore) updateWakeDeliveryFence(ctx context.Context, wakeIDs []string, claimedBy, state string, retryMarker bool, validAfter time.Time) error {
 	db, err := s.dbOrErr()
 	if err != nil {
 		return err
+	}
+	if strings.TrimSpace(claimedBy) != "" && validAfter.IsZero() {
+		return ErrWakeClaimFenceLost
 	}
 	ids := uniqueWakeIDs(wakeIDs)
 	if len(ids) == 0 {
@@ -1542,17 +1740,28 @@ func (s *SQLiteSupervisionStore) updateWakeDeliveryFence(ctx context.Context, wa
 		state,
 		supervisionBoolToSQLiteInt(retryMarker),
 		state,
+		strings.TrimSpace(claimedBy),
 		state,
+		strings.TrimSpace(claimedBy),
 	}
 	for _, id := range ids {
 		args = append(args, id)
+	}
+	where := "wake_id IN (" + placeholders + ")"
+	if owner := strings.TrimSpace(claimedBy); owner != "" {
+		where += " AND claimed_by = ?"
+		where += " AND claimed_at IS NOT NULL AND claimed_at >= ?"
+		if state != WakeDeliveryStateAccepted {
+			where += " AND COALESCE(delivery_state, '') = ''"
+		}
+		args = append(args, owner, formatSupervisionTime(validAfter))
 	}
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin wake delivery fence: %w", err)
 	}
 	defer tx.Rollback()
-	_, err = tx.ExecContext(ctx, `
+	result, err := tx.ExecContext(ctx, `
 		UPDATE supervision_wake_pending
 		SET delivery_state = CASE
 				WHEN delivery_state = ? AND ? = 'submitting' THEN delivery_state
@@ -1562,14 +1771,23 @@ func (s *SQLiteSupervisionStore) updateWakeDeliveryFence(ctx context.Context, wa
 				WHEN marker_repair_required != 0 OR ? != 0 THEN 1
 				ELSE marker_repair_required
 			END,
-			claimed_at = CASE WHEN ? = 'accepted' THEN NULL ELSE claimed_at END,
-			claimed_by = CASE WHEN ? = 'accepted' THEN '' ELSE claimed_by END
-		WHERE wake_id IN (`+placeholders+`)
+			claimed_at = CASE WHEN ? = 'accepted' AND ? = '' THEN NULL ELSE claimed_at END,
+			claimed_by = CASE WHEN ? = 'accepted' AND ? = '' THEN '' ELSE claimed_by END
+		WHERE `+where+`
 	`,
 		args...,
 	)
 	if err != nil {
 		return fmt.Errorf("update wake delivery fence: %w", err)
+	}
+	if owner := strings.TrimSpace(claimedBy); owner != "" {
+		affected, rowsErr := result.RowsAffected()
+		if rowsErr != nil {
+			return rowsErr
+		}
+		if affected != int64(len(ids)) {
+			return ErrWakeClaimFenceLost
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit wake delivery fence: %w", err)
@@ -1709,7 +1927,107 @@ func (s *SQLiteSupervisionStore) MarkWakeDelivered(ctx context.Context, d WakeDe
 	// The first delivery wins: a concurrent duplicate (or a replay) must not
 	// fail the caller, because the entire point of the ledger is that the
 	// second delivery is a no-op (AC-P1-4b).
-	_, err = db.ExecContext(ctx, `
+	if err := insertWakeDelivered(ctx, db, d); err != nil {
+		return fmt.Errorf("mark wake delivered: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLiteSupervisionStore) CommitWakeConsumptionOwned(
+	ctx context.Context,
+	wakes []WakePending,
+	claimedBy string,
+	validAfter, consumedAt time.Time,
+	consumption, reason string,
+) error {
+	owner := strings.TrimSpace(claimedBy)
+	if owner == "" || validAfter.IsZero() {
+		return ErrWakeClaimFenceLost
+	}
+	unique := make([]WakePending, 0, len(wakes))
+	seen := make(map[string]struct{}, len(wakes))
+	for _, wake := range wakes {
+		id := strings.TrimSpace(wake.WakeID)
+		if id == "" {
+			continue
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		wake.WakeID = id
+		unique = append(unique, wake)
+	}
+	if len(unique) == 0 {
+		return nil
+	}
+	if consumedAt.IsZero() {
+		consumedAt = time.Now().UTC()
+	}
+	db, err := s.dbOrErr()
+	if err != nil {
+		return err
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin owned wake consumption: %w", err)
+	}
+	defer tx.Rollback()
+	for _, wake := range unique {
+		if key := strings.TrimSpace(wake.NotifyKey); key != "" {
+			if err := insertWakeDelivered(ctx, tx, WakeDelivered{
+				NotifyKey:             key,
+				RootScopeID:           wake.RootScopeID,
+				TargetParentSessionID: wake.TargetParentSessionID,
+				TargetParentTeamID:    wake.TargetParentTeamID,
+				WakeID:                wake.WakeID,
+				TurnID:                wake.TurnID,
+				EventKind:             wake.EventKind,
+				ObligationID:          wake.ObligationID,
+				EventSeq:              wake.EventSeq,
+				DeliveredAt:           consumedAt,
+				DeliveredBy:           owner,
+				Consumption:           consumption,
+				Reason:                reason,
+			}); err != nil {
+				return fmt.Errorf("record owned wake consumption: %w", err)
+			}
+		}
+		result, err := tx.ExecContext(ctx, `
+			DELETE FROM supervision_wake_pending
+			WHERE wake_id = ? AND claimed_by = ? AND claimed_at >= ?
+				AND COALESCE(delivery_state, '') IN ('', 'accepted')
+		`, wake.WakeID, owner, formatSupervisionTime(validAfter))
+		if err != nil {
+			return fmt.Errorf("resolve owned wake consumption: %w", err)
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if affected != 1 {
+			return ErrWakeClaimFenceLost
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit owned wake consumption: %w", err)
+	}
+	return nil
+}
+
+type wakeDeliveryExecutor interface {
+	ExecContext(context.Context, string, ...interface{}) (sql.Result, error)
+}
+
+func insertWakeDelivered(ctx context.Context, exec wakeDeliveryExecutor, d WakeDelivered) error {
+	key := strings.TrimSpace(d.NotifyKey)
+	if key == "" {
+		return nil
+	}
+	if d.DeliveredAt.IsZero() {
+		d.DeliveredAt = time.Now().UTC()
+	}
+	_, err := exec.ExecContext(ctx, `
 		INSERT INTO supervision_wake_delivered (
 			notify_key, root_scope_id, target_parent_session_id, target_parent_team_id,
 			wake_id, turn_id, event_kind, obligation_id, event_seq, delivered_at, delivered_by,
@@ -1732,7 +2050,7 @@ func (s *SQLiteSupervisionStore) MarkWakeDelivered(ctx context.Context, d WakeDe
 		strings.TrimSpace(d.Reason),
 	)
 	if err != nil {
-		return fmt.Errorf("mark wake delivered: %w", err)
+		return err
 	}
 	return nil
 }

@@ -34,6 +34,32 @@ func (s *failWakeLedgerStore) MarkWakeDelivered(ctx context.Context, delivered W
 	return s.Store.MarkWakeDelivered(ctx, delivered)
 }
 
+// CommitWakeConsumptionOwned is the atomic ledger+resolve path used by live
+// wake delivery. Count each ledger item before delegating the whole batch so a
+// fault injected in the middle of a batch verifies that the underlying
+// transaction rolls back every item.
+func (s *failWakeLedgerStore) CommitWakeConsumptionOwned(
+	ctx context.Context,
+	wakes []WakePending,
+	claimedBy string,
+	validAfter, consumedAt time.Time,
+	consumption, reason string,
+) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, wake := range wakes {
+		if wake.NotifyKey == "" {
+			continue
+		}
+		s.calls++
+		s.attempts[wake.NotifyKey]++
+		if s.failAtCall > 0 && s.calls == s.failAtCall {
+			return s.err
+		}
+	}
+	return s.Store.CommitWakeConsumptionOwned(ctx, wakes, claimedBy, validAfter, consumedAt, consumption, reason)
+}
+
 func (s *failWakeLedgerStore) attemptsFor(key string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -398,7 +424,7 @@ func TestWakeConsumer_SubmittingFenceAfterRestartIsNotReplayedOrRepaired(t *test
 	require.True(t, pending[0].MarkerRepairRequired)
 }
 
-func TestWakeConsumer_PartialDeliveryLedgerWriteRetriesOnlyMissingKey(t *testing.T) {
+func TestWakeConsumer_AtomicDeliveryLedgerFailureRetriesWholeBatch(t *testing.T) {
 	ctx := context.Background()
 	baseStore := newTestStore(t, "wake-consumer-partial-ledger")
 	ledgerErr := errors.New("injected ledger write failure")
@@ -454,16 +480,20 @@ func TestWakeConsumer_PartialDeliveryLedgerWriteRetriesOnlyMissingKey(t *testing
 	for _, item := range pending {
 		require.Equal(t, WakeDeliveryStateAccepted, item.DeliveryState)
 	}
+	for _, key := range keys {
+		require.False(t, mustDelivered(t, baseStore, key), "an atomic ledger failure must roll back every key")
+	}
 
 	// The injected failure was one-shot. The accepted-fence recovery drain
-	// must backfill its ledger without resubmitting the parent prompt.
+	// must backfill the whole transaction without resubmitting the parent
+	// prompt.
 	require.NoError(t, consumer.MaybeWakeParent(ctx, "parent-partial-ledger", "", "root-partial-ledger"))
 	require.Equal(t, 1, modelDeliveries)
 	for _, key := range keys {
 		require.True(t, mustDelivered(t, baseStore, key), "all notification keys must eventually be durable")
 	}
-	require.Equal(t, 1, store.attemptsFor(keys[0]), "the successful partial write must not be repeated")
-	require.Equal(t, 2, store.attemptsFor(keys[1]), "only the missing ledger key should be retried")
+	require.Equal(t, 2, store.attemptsFor(keys[0]), "the atomic batch must retry the first key after rollback")
+	require.Equal(t, 2, store.attemptsFor(keys[1]), "the atomic batch must retry the second key after rollback")
 	pending, err = baseStore.ListWakePending(ctx, WakeFilter{
 		RootScopeID:           "root-partial-ledger",
 		TargetParentSessionID: "parent-partial-ledger",

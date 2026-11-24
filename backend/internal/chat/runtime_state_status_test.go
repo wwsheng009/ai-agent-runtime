@@ -24,7 +24,8 @@ func newStatusTestStore(t *testing.T) *SQLiteRuntimeStore {
 }
 
 // TestLoadStateStatusMatchesScalarFields 锁定标量投影与完整 LoadState 的一致性：
-// status / turn / checkpoint / suspended / head_offset / updated_at 必须完全一致。
+// status / turn / episode / checkpoint / suspended / finalized / head_offset /
+// updated_at 必须完全一致。
 //
 // 这是 LoadStateStatus 的唯一正确性契约 —— 它被用来替代 LoadState 做
 // 「只看 status」的判定，任何标量漂移都会让对账结论出错。
@@ -36,8 +37,13 @@ func TestLoadStateStatusMatchesScalarFields(t *testing.T) {
 		SessionID:             "sess-status-parity",
 		Status:                SessionWaitingApproval,
 		CurrentTurnID:         "turn-abc",
+		CurrentEpisodeID:      "episode-abc",
 		CurrentCheckpointID:   "chk-1",
 		SuspendedTurnID:       "turn-susp",
+		SuspendedEpisodeID:    "episode-susp",
+		TurnPhase:             ParentTurnPhaseParked,
+		FinalizedTurnID:       "turn-finalized",
+		FinalizedEpisodeID:    "episode-finalized",
 		LastRunTerminalReason: "approval_pending",
 		HeadOffset:            42,
 		UpdatedAt:             time.Now().UTC().Truncate(time.Microsecond),
@@ -55,8 +61,13 @@ func TestLoadStateStatusMatchesScalarFields(t *testing.T) {
 	require.Equal(t, full.SessionID, scalar.SessionID)
 	require.Equal(t, full.Status, scalar.Status)
 	require.Equal(t, full.CurrentTurnID, scalar.CurrentTurnID)
+	require.Equal(t, full.CurrentEpisodeID, scalar.CurrentEpisodeID)
 	require.Equal(t, full.CurrentCheckpointID, scalar.CurrentCheckpointID)
 	require.Equal(t, full.SuspendedTurnID, scalar.SuspendedTurnID)
+	require.Equal(t, full.SuspendedEpisodeID, scalar.SuspendedEpisodeID)
+	require.Equal(t, full.TurnPhase, scalar.TurnPhase)
+	require.Equal(t, full.FinalizedTurnID, scalar.FinalizedTurnID)
+	require.Equal(t, full.FinalizedEpisodeID, scalar.FinalizedEpisodeID)
 	require.Equal(t, full.LastRunTerminalReason, scalar.LastRunTerminalReason)
 	require.Equal(t, full.HeadOffset, scalar.HeadOffset)
 	require.True(t, full.UpdatedAt.Equal(scalar.UpdatedAt),

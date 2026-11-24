@@ -193,33 +193,45 @@ func (s *SQLiteSupervisionStore) MarkResumeSubmitted(ctx context.Context, claimK
 	return affected == 1, nil
 }
 
-// RenewResumeClaim refreshes claimed_at for the live lease holder. Version is
-// deliberately unchanged so the holder's later CAS transitions remain valid.
-func (s *SQLiteSupervisionStore) RenewResumeClaim(ctx context.Context, claimKey string, at time.Time, expectedVersion int64) (bool, error) {
+// RenewResumeClaim refreshes claimed_at for the live lease holder and advances
+// the fencing version. A renewal is therefore a real lease transition: any
+// stale holder that still carries the previous version can no longer submit or
+// release the claim after this update.
+func (s *SQLiteSupervisionStore) RenewResumeClaim(ctx context.Context, claimKey string, at time.Time, expectedVersion int64) (ResumeClaim, bool, error) {
 	claimKey = strings.TrimSpace(claimKey)
 	if claimKey == "" {
-		return false, nil
+		return ResumeClaim{}, false, nil
 	}
 	if at.IsZero() {
 		at = time.Now().UTC()
 	}
 	db, err := s.dbOrErr()
 	if err != nil {
-		return false, err
+		return ResumeClaim{}, false, err
 	}
 	result, err := db.ExecContext(ctx, `
 		UPDATE supervision_resume_claims
-		SET claimed_at = ?
+		SET claimed_at = ?, version = version + 1
 		WHERE claim_key = ? AND state = 'claimed' AND version = ?
 	`, formatSupervisionTime(at), claimKey, expectedVersion)
 	if err != nil {
-		return false, fmt.Errorf("renew resume claim: %w", err)
+		return ResumeClaim{}, false, fmt.Errorf("renew resume claim: %w", err)
 	}
 	affected, err := result.RowsAffected()
 	if err != nil {
-		return false, err
+		return ResumeClaim{}, false, err
 	}
-	return affected == 1, nil
+	if affected != 1 {
+		return ResumeClaim{}, false, nil
+	}
+	renewed, err := s.GetResumeClaim(ctx, claimKey)
+	if err != nil {
+		return ResumeClaim{}, false, err
+	}
+	if renewed == nil {
+		return ResumeClaim{}, false, fmt.Errorf("resume claim disappeared after renewal")
+	}
+	return *renewed, true, nil
 }
 
 func (s *SQLiteSupervisionStore) ReleaseResumeClaim(ctx context.Context, claimKey string, expectedVersion int64) (bool, error) {

@@ -74,22 +74,29 @@ type Agent struct {
 	// keeps a chatty model from flooding the supervision control plane.
 	suspensionDegradationProjector SuspensionDegradationProjector
 	suspensionDegraded             map[string]bool
-	backgroundBatches              bool
-	toolCatalog                    *mcpcatalog.Catalog
-	eventBus                       *runtimeevents.Bus
-	skillObserver                  skillInvocationObserver
-	skillIndexGen                  uint64
-	promptBuild                    *PromptBuilder
-	toolPolicy                     *ToolExecutionPolicy
-	toolHooks                      ToolHooks
-	permEngine                     *PermissionEngine
-	toolBroker                     *ToolBroker
-	hookManager                    *HookManager
-	checkpointMgr                  *CheckpointManager
-	checkpointDisabled             bool
-	mu                             sync.RWMutex
-	running                        bool
-	state                          AgentState
+	// turnSuspensionProjector is called after a durable turn-suspension write.
+	// A delegated child can finish before the parent has persisted its
+	// suspension; the terminal projection then has no row to wake. Hosts use
+	// this hook to reconcile the newly written row through the normal durable
+	// wake consumer, closing that ordering window without starting a turn
+	// directly from the agent loop.
+	turnSuspensionProjector TurnSuspensionProjector
+	backgroundBatches       bool
+	toolCatalog             *mcpcatalog.Catalog
+	eventBus                *runtimeevents.Bus
+	skillObserver           skillInvocationObserver
+	skillIndexGen           uint64
+	promptBuild             *PromptBuilder
+	toolPolicy              *ToolExecutionPolicy
+	toolHooks               ToolHooks
+	permEngine              *PermissionEngine
+	toolBroker              *ToolBroker
+	hookManager             *HookManager
+	checkpointMgr           *CheckpointManager
+	checkpointDisabled      bool
+	mu                      sync.RWMutex
+	running                 bool
+	state                   AgentState
 }
 
 // AgentState Agent 状态

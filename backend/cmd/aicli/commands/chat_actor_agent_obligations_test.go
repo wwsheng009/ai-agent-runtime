@@ -557,6 +557,56 @@ func TestProjectLocalAgentCompletionDoesNotDoubleWakeCriticalSettledTurn(t *test
 	require.Empty(t, pending, "结算 wake 不得重复 critical 生命周期 wake")
 }
 
+// TestParkLocalAgentChildObligationRepairsTerminalBeforePark pins the
+// dispatch-before-park race. A very fast child can publish its terminal
+// projection before the parent-side spawn/followup call persists the
+// suspension. The completion path correctly finds no suspension at that
+// instant; the park path must then re-check the durable ledger and create the
+// normal settlement wake instead of leaving the parent parked forever.
+func TestParkLocalAgentChildObligationRepairsTerminalBeforePark(t *testing.T) {
+	host, store, deliveries := newWakeConsumerTestHost(t, "aicli-terminal-before-park")
+	ctx := context.Background()
+	attachSettledTurnWakeFixture(t, host, store, "terminal-before-park-batches")
+
+	require.NoError(t, host.RuntimeStore.SaveState(ctx, &runtimechat.RuntimeState{
+		SessionID: "root-session",
+		Status:    runtimechat.SessionIdle,
+		UpdatedAt: time.Now().UTC(),
+	}))
+
+	// The child has already completed, but no parent suspension exists yet.
+	_, err := supervision.ProjectAgentCompletion(
+		ctx,
+		store,
+		nil,
+		"root-session",
+		"root-session",
+		"child-race",
+		"idle",
+		"session_end",
+	)
+	require.NoError(t, err)
+	pending, err := store.ListWakePending(ctx, supervision.WakeFilter{
+		RootScopeID:   "root-session",
+		UnclaimedOnly: true,
+	})
+	require.NoError(t, err)
+	require.Empty(t, pending, "completion before park has no wake target yet")
+
+	parkCtx := agent.WithTurnID(ctx, "turn-terminal-before-park")
+	require.True(t, host.parkLocalAgentChildObligation(parkCtx, "root-session", "child-race"))
+
+	deliveries.wait(t, time.Second)
+	require.Equal(t, 1, deliveries.count(), "the post-park reconciliation must resume the parent")
+	require.Equal(t, "root-session", deliveries.lastParent())
+	pending, err = store.ListWakePending(ctx, supervision.WakeFilter{
+		RootScopeID:   "root-session",
+		UnclaimedOnly: true,
+	})
+	require.NoError(t, err)
+	require.Empty(t, pending, "the normal wake consumer must consume the repaired wake")
+}
+
 // TestLocalSubagentBatchProjectorSchedulesSettledWake 钉住成功批次的结算缺边
 // （真机 2026-10-10：批次全部成功 → 没有 lifecycle wake → 父会话数小时停在
 // "Waiting for subagents"）：info 终态也必须在 durable 账本全终态时补排一笔

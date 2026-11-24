@@ -161,6 +161,11 @@ func (h *localChatRuntimeHost) parkLocalAgentChildObligation(ctx context.Context
 	obligationID := subagentbatch.AgentSessionObligationID(childSessionID)
 	for _, existing := range record.ObligationIDs {
 		if existing == obligationID {
+			// The child may have reached terminal state before the first
+			// completion callback observed this suspension row. Even a
+			// duplicate park request must re-run the durable settlement check;
+			// otherwise the early return can preserve the lost-wake window.
+			_ = h.reconcileParkedTurnSettlement(ctx, record)
 			return true
 		}
 	}
@@ -174,6 +179,10 @@ func (h *localChatRuntimeHost) parkLocalAgentChildObligation(ctx context.Context
 	if err := h.SubagentBatches.ParkTurnSuspension(ctx, record); err != nil {
 		return false
 	}
+	// Spawn/followup starts the child before this host-side park is persisted.
+	// If the child completed in that interval, its terminal projection had no
+	// suspension to target. Reconcile only after the durable write.
+	_ = h.reconcileParkedTurnSettlement(ctx, record)
 	if firstPark {
 		h.announceLocalTurnSuspended(record)
 	}

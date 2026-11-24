@@ -82,12 +82,16 @@ func (s *WakeScheduler) SelfCheckPending(ctx context.Context, rootScopeID string
 	pending, err := s.store.ListWakePending(ctx, WakeFilter{
 		RootScopeID:   rootScopeID,
 		UnclaimedOnly: true,
-		Limit:         1,
 	})
 	if err != nil {
 		return false, fmt.Errorf("list wake pending: %w", err)
 	}
-	return len(pending) > 0, nil
+	for _, row := range pending {
+		if strings.TrimSpace(row.DeliveryState) == "" {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // RootDigest builds the same aggregated lifecycle digest the parent turn
@@ -124,17 +128,156 @@ func (s *WakeScheduler) ResolveUnclaimedWakes(ctx context.Context, rootScopeID s
 	if err != nil {
 		return 0, fmt.Errorf("list wake pending: %w", err)
 	}
+	owner := uniqueSupervisionID("wake-owner-")
+	now := s.now().UTC()
 	resolved := 0
 	for _, row := range pending {
 		if strings.TrimSpace(row.WakeID) == "" {
 			continue
 		}
-		if err := s.ResolveWake(ctx, row.WakeID); err != nil {
+		if strings.TrimSpace(row.DeliveryState) != "" {
+			continue
+		}
+		claimed, err := s.store.ClaimWakePending(ctx, row.WakeID, owner, now)
+		if err != nil {
+			return resolved, err
+		}
+		if !claimed {
+			continue
+		}
+		claimedAt := now
+		row.ClaimedAt = &claimedAt
+		row.ClaimedBy = owner
+		if err := s.ResolveWakeOwned(ctx, row); err != nil {
 			return resolved, err
 		}
 		resolved++
 	}
 	return resolved, nil
+}
+
+func (c *WakeConsumer) maybeSelfCheckLegacy(ctx context.Context, parentSessionID, parentTeamID, rootScopeID string) (bool, error) {
+	now := c.clock()
+	staleBefore := now.Add(-c.Wakes.claimStaleAfter)
+	if _, err := c.Wakes.store.ReleaseStaleWakePending(ctx, staleBefore); err != nil {
+		return false, err
+	}
+	if _, err := c.Wakes.store.ReleaseStaleAcceptedWakePending(ctx, staleBefore); err != nil {
+		return false, err
+	}
+	if _, err := c.Wakes.store.ReleaseStaleSubmittingWakePending(ctx, staleBefore); err != nil {
+		return false, err
+	}
+	pending, err := c.Wakes.store.ListWakePending(ctx, WakeFilter{
+		RootScopeID:           rootScopeID,
+		TargetParentSessionID: parentSessionID,
+		TargetParentTeamID:    parentTeamID,
+		UnclaimedOnly:         true,
+	})
+	if err != nil || len(pending) == 0 {
+		return false, err
+	}
+
+	claimOwner := uniqueSupervisionID("wake-owner-")
+	var ordinary, accepted []WakePending
+	for _, row := range pending {
+		state := strings.TrimSpace(row.DeliveryState)
+		if state != "" && state != WakeDeliveryStateAccepted {
+			continue
+		}
+		owned, claimErr := c.Wakes.store.ClaimWakePending(ctx, row.WakeID, claimOwner, now)
+		if claimErr != nil {
+			for _, claimed := range append(ordinary, accepted...) {
+				_ = c.Wakes.ReleaseWake(ctx, claimed.WakeID, claimOwner)
+			}
+			return false, claimErr
+		}
+		if !owned {
+			continue
+		}
+		claimedAt := now
+		row.ClaimedAt = &claimedAt
+		row.ClaimedBy = claimOwner
+		if state == WakeDeliveryStateAccepted {
+			accepted = append(accepted, row)
+		} else {
+			ordinary = append(ordinary, row)
+		}
+	}
+
+	if len(accepted) > 0 {
+		deliveryCtx, stopRenewal := c.startWakeClaimRenewal(ctx, accepted)
+		err := c.deliverResultsConsumptionRetry(deliveryCtx, parentSessionID, rootScopeID, accepted)
+		stopRenewal()
+		if err != nil {
+			_ = c.releaseForRetry(ctx, accepted)
+			for _, wake := range ordinary {
+				_ = c.Wakes.ReleaseWake(ctx, wake.WakeID, wake.ClaimedBy)
+			}
+			return false, err
+		}
+	}
+	if len(ordinary) == 0 {
+		return false, nil
+	}
+
+	deliveryCtx, stopRenewal := c.startWakeClaimRenewal(ctx, ordinary)
+	defer stopRenewal()
+	digest, err := c.Wakes.RootDigest(deliveryCtx, rootScopeID, parentSessionID, parentTeamID)
+	if err != nil {
+		for _, wake := range ordinary {
+			_ = c.Wakes.ReleaseWake(ctx, wake.WakeID, wake.ClaimedBy)
+		}
+		return false, err
+	}
+	if digest == nil || (len(digest.Items) == 0 && len(digest.Progress) == 0) {
+		stopRenewal()
+		for _, wake := range ordinary {
+			_ = c.Wakes.ResolveWakeOwned(ctx, wake)
+		}
+		return false, nil
+	}
+	if !c.Wakes.AllowSelfCheck(rootScopeID) {
+		for _, wake := range ordinary {
+			_ = c.Wakes.ReleaseWake(ctx, wake.WakeID, wake.ClaimedBy)
+		}
+		return false, nil
+	}
+	wakeIDs := wakeIDsOf(ordinary)
+	wakeOwner := wakeClaimOwner(ordinary)
+	// Preserve the legacy digest-only host contract: these wakes are fenced
+	// internally, but a self-check is not a direct wake-id resumption and does
+	// not consume the queued wake. Only an explicit acceptance error carrying
+	// a receipt crosses the durable acceptance boundary.
+	if deliveryErr := c.Deliver(deliveryCtx, parentSessionID, rootScopeID, digest, nil); deliveryErr != nil {
+		if deliveryCtx.Err() != nil {
+			return false, fmt.Errorf("wake delivery lease lost: %w", ErrWakeClaimFenceLost)
+		}
+		_, accepted := AcceptedDelivery(deliveryErr)
+		if accepted {
+			return true, c.handleDeliveryError(ctx, deliveryCtx, parentSessionID, rootScopeID, digest, ordinary, nil, wakeIDs, nil, func() {}, stopRenewal, deliveryErr)
+		}
+		stopRenewal()
+		if ctx.Err() != nil || wakeDeliveryLeaseLost(deliveryCtx) {
+			return false, fmt.Errorf("wake delivery lease lost: %w", ErrWakeClaimFenceLost)
+		}
+		releaseErr := c.releaseForRetry(ctx, ordinary)
+		return false, joinDeliveryErrors(deliveryErr, releaseErr)
+	}
+	if deliveryCtx.Err() != nil {
+		return false, fmt.Errorf("wake delivery lease lost: %w", ErrWakeClaimFenceLost)
+	}
+	stopRenewal()
+	if ctx.Err() != nil || wakeDeliveryLeaseLost(deliveryCtx) {
+		return false, fmt.Errorf("wake delivery lease lost: %w", ErrWakeClaimFenceLost)
+	}
+	var releaseErr error
+	for _, wake := range ordinary {
+		if err := c.Wakes.ReleaseWake(ctx, wake.WakeID, wakeOwner); err != nil {
+			releaseErr = joinDeliveryErrors(releaseErr, err)
+		}
+	}
+	return true, releaseErr
 }
 
 // MaybeSelfCheckParent is the turn-end hook for a parent whose wake was
@@ -163,30 +306,7 @@ func (c *WakeConsumer) MaybeSelfCheckParent(ctx context.Context, parentSessionID
 		return false, nil
 	}
 	if c.Admission == nil {
-		pending, err := c.Wakes.SelfCheckPending(ctx, rootScopeID)
-		if err != nil || !pending {
-			return false, err
-		}
-		digest, err := c.Wakes.RootDigest(ctx, rootScopeID, parentSessionID, parentTeamID)
-		if err != nil {
-			return false, err
-		}
-		if digest == nil || len(digest.Items) == 0 {
-			// The notification was resolved (or already acknowledged) while the
-			// wake stayed durable: drop the stale rows instead of spending an
-			// allowance on a content-free turn.
-			if _, err := c.Wakes.ResolveUnclaimedWakes(ctx, rootScopeID); err != nil {
-				return false, err
-			}
-			return false, nil
-		}
-		if !c.Wakes.AllowSelfCheck(rootScopeID) {
-			return false, nil
-		}
-		if err := c.Deliver(ctx, parentSessionID, rootScopeID, digest, nil); err != nil {
-			return false, err
-		}
-		return true, nil
+		return c.maybeSelfCheckLegacy(ctx, parentSessionID, parentTeamID, rootScopeID)
 	}
 
 	// The self-check bypasses the class budget, not finalization admission or
@@ -194,6 +314,12 @@ func (c *WakeConsumer) MaybeSelfCheckParent(ctx context.Context, parentSessionID
 	// settlement per episode, and resolve the delivered wakes so a later window
 	// cannot replay the same continuation.
 	_, _ = c.Admission.RecoverStaleClaims(ctx)
+	if _, err := c.Wakes.store.ReleaseStaleWakePending(ctx, c.clock().Add(-c.Wakes.claimStaleAfter)); err != nil {
+		return false, err
+	}
+	if _, err := c.Wakes.store.ReleaseStaleAcceptedWakePending(ctx, c.clock().Add(-c.Wakes.claimStaleAfter)); err != nil {
+		return false, err
+	}
 	pending, err := c.Wakes.store.ListWakePending(ctx, WakeFilter{
 		RootScopeID:           rootScopeID,
 		TargetParentSessionID: parentSessionID,
@@ -203,15 +329,54 @@ func (c *WakeConsumer) MaybeSelfCheckParent(ctx context.Context, parentSessionID
 	if err != nil {
 		return false, err
 	}
+	// Self-check is still a parent-turn delivery path. Do not let it process
+	// an accepted/submitting row as a model wake, and do not evaluate an
+	// unowned row that a concurrent normal drain could reclaim underneath us.
+	claimOwner := uniqueSupervisionID("wake-owner-")
+	claimedRows := make([]WakePending, 0, len(pending))
+	now := c.clock()
+	for _, row := range pending {
+		if strings.TrimSpace(row.DeliveryState) != "" {
+			continue
+		}
+		owned, claimErr := c.Wakes.store.ClaimWakePending(ctx, row.WakeID, claimOwner, now)
+		if claimErr != nil {
+			for _, held := range claimedRows {
+				_ = c.Wakes.ReleaseWake(ctx, held.WakeID, claimOwner)
+			}
+			return false, claimErr
+		}
+		if !owned {
+			continue
+		}
+		claimedAt := now
+		row.ClaimedAt = &claimedAt
+		row.ClaimedBy = claimOwner
+		claimedRows = append(claimedRows, row)
+	}
+	if len(claimedRows) == 0 {
+		return false, nil
+	}
 	claims := map[string]ResumeClaim{}
-	admitted := make([]WakePending, 0, len(pending))
+	stopClaimRenewal := func() {}
+	deliveryCtx, stopWakeClaimRenewal := c.startWakeClaimRenewal(ctx, claimedRows)
+	defer stopWakeClaimRenewal()
+	admitted := make([]WakePending, 0, len(claimedRows))
+	releaseWakeClaims := func() {
+		for _, row := range claimedRows {
+			_ = c.Wakes.ReleaseWake(ctx, row.WakeID, row.ClaimedBy)
+		}
+	}
 	releaseClaims := func() {
+		stopClaimRenewal()
+		stopWakeClaimRenewal()
 		for _, held := range claims {
 			_ = c.Admission.Release(ctx, held)
 		}
+		releaseWakeClaims()
 	}
-	for _, row := range pending {
-		result, admitErr := c.Admission.Evaluate(ctx, ResumeAdmissionInputFromWake(row))
+	for _, row := range claimedRows {
+		result, admitErr := c.Admission.Evaluate(deliveryCtx, ResumeAdmissionInputFromWake(row))
 		if admitErr != nil {
 			releaseClaims()
 			return false, nil
@@ -223,7 +388,10 @@ func (c *WakeConsumer) MaybeSelfCheckParent(ctx context.Context, parentSessionID
 			if result.Decision == RejectStale {
 				consumption = "stale"
 			}
-			_ = c.Wakes.markConsumed(ctx, row, consumption, reason)
+			if consumeErr := c.Wakes.markConsumed(deliveryCtx, row, consumption, reason); consumeErr != nil {
+				releaseClaims()
+				return false, consumeErr
+			}
 		case RetryAdmission:
 			releaseClaims()
 			return false, nil
@@ -234,13 +402,16 @@ func (c *WakeConsumer) MaybeSelfCheckParent(ctx context.Context, parentSessionID
 					claimKey = DeriveResumeClaimKey(result.Input.ParentSessionID, result.Input.ParentTurnID, result.Input.ParentEpisodeID, result.Input.SettlementCohortID, result.Input.SettlementID)
 				}
 				if _, exists := claims[claimKey]; !exists {
-					claim, won, claimErr := c.Admission.Claim(ctx, result)
+					claim, won, claimErr := c.Admission.Claim(deliveryCtx, result)
 					if claimErr != nil {
 						releaseClaims()
 						return false, claimErr
 					}
 					if !won {
-						_ = c.Wakes.markConsumed(ctx, row, "notification_only", "settlement_already_claimed")
+						if consumeErr := c.Wakes.markConsumed(deliveryCtx, row, "notification_only", "settlement_already_claimed"); consumeErr != nil {
+							releaseClaims()
+							return false, consumeErr
+						}
 						continue
 					}
 					claims[claimKey] = claim
@@ -253,16 +424,22 @@ func (c *WakeConsumer) MaybeSelfCheckParent(ctx context.Context, parentSessionID
 		releaseClaims()
 		return false, nil
 	}
-	stopClaimRenewal := c.startClaimRenewal(claims)
+	stopClaimRenewal = c.startClaimRenewal(claims)
 	defer stopClaimRenewal()
-	digest, err := c.Wakes.RootDigest(ctx, rootScopeID, parentSessionID, parentTeamID)
+	digest, err := c.Wakes.RootDigest(deliveryCtx, rootScopeID, parentSessionID, parentTeamID)
 	if err != nil {
 		releaseClaims()
 		return false, err
 	}
 	if digest == nil || (len(digest.Items) == 0 && len(digest.Progress) == 0) {
-		releaseClaims()
-		c.releasePending(ctx, admitted)
+		stopClaimRenewal()
+		stopWakeClaimRenewal()
+		for _, held := range claims {
+			_ = c.Admission.Release(ctx, held)
+		}
+		for _, row := range admitted {
+			_ = c.Wakes.ResolveWakeOwned(ctx, row)
+		}
 		return false, nil
 	}
 	if !c.Wakes.AllowSelfCheck(rootScopeID) {
@@ -273,18 +450,53 @@ func (c *WakeConsumer) MaybeSelfCheckParent(ctx context.Context, parentSessionID
 	for _, row := range admitted {
 		wakeIDs = append(wakeIDs, row.WakeID)
 	}
-	if err := c.Deliver(ctx, parentSessionID, rootScopeID, digest, wakeIDs); err != nil {
+	wakeOwner := wakeClaimOwner(admitted)
+	if err := c.Wakes.store.MarkWakeDeliverySubmittingOwned(deliveryCtx, wakeIDs, wakeOwner, false, c.Wakes.wakeClaimValidAfter()); err != nil {
 		releaseClaims()
 		return false, err
+	}
+	if deliveryErr := c.Deliver(deliveryCtx, parentSessionID, rootScopeID, digest, wakeIDs); deliveryErr != nil {
+		if deliveryCtx.Err() != nil {
+			return false, fmt.Errorf("wake delivery lease lost: %w", ErrWakeClaimFenceLost)
+		}
+		_, accepted := AcceptedDelivery(deliveryErr)
+		handledErr := c.handleDeliveryError(ctx, deliveryCtx, parentSessionID, rootScopeID, digest, admitted, nil, wakeIDs, claims, stopClaimRenewal, stopWakeClaimRenewal, deliveryErr)
+		return accepted, handledErr
+	}
+	if deliveryCtx.Err() != nil {
+		return false, fmt.Errorf("wake delivery lease lost: %w", ErrWakeClaimFenceLost)
 	}
 	// Self-check resumes the same parked turn through the legacy Deliver hook,
 	// so it must emit the same wake-start milestone as MaybeWakeParent; otherwise
 	// the durable audit sees only the later settled closure.
-	c.announceResume(ctx, parentSessionID, rootScopeID, admitted, nil)
-	for _, held := range claims {
-		_ = c.Admission.MarkSubmitted(ctx, held, resumeClaimModelTurnID(held, strings.Join(wakeIDs, ",")))
+	stopClaimRenewal()
+	stopWakeClaimRenewal()
+	if ctx.Err() != nil || wakeDeliveryLeaseLost(deliveryCtx) {
+		return false, fmt.Errorf("wake delivery lease lost: %w", ErrWakeClaimFenceLost)
 	}
-	_ = c.Wakes.RecordWakeDelivery(ctx, admitted)
-	c.releasePending(ctx, admitted)
-	return true, nil
+	acceptedErr := c.Wakes.store.MarkWakeDeliveryAcceptedOwned(ctx, wakeIDs, wakeOwner, false, c.Wakes.wakeClaimValidAfter())
+	if acceptedErr != nil {
+		return true, acceptedErr
+	}
+	c.announceResume(ctx, parentSessionID, rootScopeID, admitted, nil)
+	submittedErr := c.markClaimsSubmitted(ctx, claims, wakeIDs)
+	var consumptionErr error
+	if submittedErr == nil && acceptedErr == nil {
+		consumptionErr = c.Wakes.store.CommitWakeConsumptionOwned(
+			ctx,
+			admitted,
+			wakeOwner,
+			c.Wakes.wakeClaimValidAfter(),
+			c.clock(),
+			"model_turn",
+			"",
+		)
+		if consumptionErr != nil {
+			consumptionErr = joinDeliveryErrors(consumptionErr, c.releaseForRetry(ctx, admitted))
+		}
+	} else {
+		releaseErr := c.releaseForRetry(ctx, admitted)
+		consumptionErr = releaseErr
+	}
+	return true, joinDeliveryErrors(submittedErr, joinDeliveryErrors(acceptedErr, consumptionErr))
 }

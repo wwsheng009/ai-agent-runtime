@@ -161,6 +161,7 @@ func (f ChildAgentFactory) Build(ctx context.Context, req ChildBuildRequest) (Ch
 	// degrade and the child turn may park forever.
 	obligationResolvers := parent.GetObligationResolvers()
 	childAgent.SetObligationResolvers(obligationResolvers)
+	childAgent.SetTurnSuspensionProjector(parent.turnSuspensionProjectorSnapshot())
 	childSchedulerConfig := childSubagentSchedulerConfig(parent.GetSubagentScheduler(), req.Config)
 	childAgent.SetSubagentScheduler(NewSubagentScheduler(childAgent, childSchedulerConfig))
 	if parentCoordinator := parent.PeekSubagentBatchCoordinator(); parentCoordinator != nil {

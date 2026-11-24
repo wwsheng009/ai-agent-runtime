@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strings"
 	"time"
@@ -363,6 +364,45 @@ func (h *localChatRuntimeHost) sweepSettledParkedTurns(ctx context.Context, _ ti
 		h.publishParkedTurnSettledResume(sweepCtx, record)
 	}
 	return outcome, nil
+}
+
+// reconcileParkedTurnSettlement closes the ordering window between dispatch
+// and durable parking. A child/batch can already be terminal when the parent
+// finally writes its suspension row; the terminal event could not have
+// scheduled a wake because there was no row to target yet. Re-checking the
+// durable obligation ledger after the park repairs exactly that case, and the
+// normal wake consumer remains the only path that can start the parent.
+func (h *localChatRuntimeHost) reconcileParkedTurnSettlement(ctx context.Context, record *subagentbatch.TurnSuspension) error {
+	if h == nil || record == nil || h.SubagentBatches == nil || h.Supervision == nil || h.Supervision.Wakes == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	parentSessionID := strings.TrimSpace(record.SessionID)
+	if parentSessionID == "" {
+		return nil
+	}
+	rootScopeID := strings.TrimSpace(record.RootScopeID)
+	if rootScopeID == "" {
+		rootScopeID = parentSessionID
+	}
+	_, scheduleErr := supervision.ScheduleSettledTurnWakeWithResolvers(
+		ctx,
+		h.SubagentBatches,
+		h.obligationResolvers(),
+		h.Supervision.Wakes,
+		parentSessionID,
+		rootScopeID,
+	)
+	wakeErr := h.wakeSupervisedParent(ctx, parentSessionID, rootScopeID)
+	// A parent that is still running, or a temporarily exhausted wake budget,
+	// deliberately keeps the durable wake pending. Neither outcome means the
+	// park reconciliation failed.
+	if errors.Is(wakeErr, supervision.ErrWakeParentBusy) || errors.Is(wakeErr, supervision.ErrWakeRateLimited) {
+		wakeErr = nil
+	}
+	return errors.Join(scheduleErr, wakeErr)
 }
 
 // publishParkedTurnSettledResume 复刻 run 边界的非 wake 闭合事件：只依赖

@@ -25,6 +25,9 @@ var (
 	// ErrWakeParentBusy is returned when the parent session is not runnable;
 	// the durable wake row is kept for the next runnable point.
 	ErrWakeParentBusy = errors.New("supervision: parent not runnable; wake kept pending")
+	// ErrWakeClaimFenceLost means a wake lease was reclaimed or otherwise
+	// advanced before this worker attempted a mutation.
+	ErrWakeClaimFenceLost = errors.New("supervision: wake claim fencing token is no longer current")
 )
 
 const (
@@ -34,6 +37,7 @@ const (
 	// (P0-2/ADR-2): bounded like the other non-approval classes, but accounted
 	// separately so progress reports cannot starve critical lifecycle wakes.
 	defaultMaxProgressWakePerWindow = 6
+	defaultWakeClaimStaleAfter      = 5 * time.Minute
 	// unlimitedWakeBudget marks a budget class without a hard cap.
 	unlimitedWakeBudget = 0
 )
@@ -171,6 +175,11 @@ type WakeResult struct {
 // WakeSchedulerConfig tunes wake debounce and rate limiting (doc 6.5 rules
 // 1 and 4, plan P1-6).
 type WakeSchedulerConfig struct {
+	// WakeClaimStaleAfter is the lease expiry for ordinary wake claims. A
+	// consumer renews this lease while building/delivering; an expired ordinary
+	// claim can be reclaimed without touching ambiguous delivery-fenced rows.
+	// Zero uses five minutes.
+	WakeClaimStaleAfter time.Duration
 	// DebounceWindow is reserved for future time-based coalescing; the
 	// current implementation coalesces via the durable dedup key until the
 	// wake is claimed and resolved.
@@ -245,6 +254,7 @@ type WakeScheduler struct {
 	maxApprovalWake int // 0 => unlimited (approval class)
 	maxProgressWake int // 0 => unlimited (progress class)
 	maxSelfCheck    int // 0 => self-check disabled
+	claimStaleAfter time.Duration
 	budgetMode      WakeBudgetMode
 	now             func() time.Time
 	// hostCapabilities resolves the announced-action capabilities lazily, so a
@@ -299,6 +309,10 @@ func NewWakeScheduler(store Store, config WakeSchedulerConfig) *WakeScheduler {
 	if budgetMode != WakeBudgetModeDurable {
 		budgetMode = WakeBudgetModeMemory
 	}
+	claimStaleAfter := config.WakeClaimStaleAfter
+	if claimStaleAfter <= 0 {
+		claimStaleAfter = defaultWakeClaimStaleAfter
+	}
 	return &WakeScheduler{
 		store:            store,
 		claims:           map[string][]time.Time{},
@@ -308,6 +322,7 @@ func NewWakeScheduler(store Store, config WakeSchedulerConfig) *WakeScheduler {
 		maxApprovalWake:  maxApprovalWake,
 		maxProgressWake:  maxProgressWake,
 		maxSelfCheck:     config.SelfCheckPerWindow,
+		claimStaleAfter:  claimStaleAfter,
 		budgetMode:       budgetMode,
 		now:              timeNow,
 		hostCapabilities: config.HostCapabilities,
@@ -579,6 +594,17 @@ func (s *WakeScheduler) DrainRunnableWithAdmission(
 }
 
 func (s *WakeScheduler) drainRunnable(ctx context.Context, parentSessionID, parentTeamID, rootScopeID string, runnable ParentRunnable, admission func(context.Context, WakePending) (ResumeAdmissionDecision, error)) ([]WakePending, *Digest, error) {
+	now := s.now().UTC()
+	staleBefore := now.Add(-s.claimStaleAfter)
+	if _, err := s.store.ReleaseStaleWakePending(ctx, staleBefore); err != nil {
+		return nil, nil, fmt.Errorf("recover stale wake claims: %w", err)
+	}
+	if _, err := s.store.ReleaseStaleAcceptedWakePending(ctx, staleBefore); err != nil {
+		return nil, nil, fmt.Errorf("recover stale accepted wake claims: %w", err)
+	}
+	if _, err := s.store.ReleaseStaleSubmittingWakePending(ctx, staleBefore); err != nil {
+		return nil, nil, fmt.Errorf("expose stale submitting wakes for recovery: %w", err)
+	}
 	pending, err := s.store.ListWakePending(ctx, WakeFilter{
 		RootScopeID:           rootScopeID,
 		TargetParentSessionID: parentSessionID,
@@ -628,6 +654,7 @@ func (s *WakeScheduler) drainRunnable(ctx context.Context, parentSessionID, pare
 		}
 		pending = markerWakes
 	}
+	claimOwner := uniqueSupervisionID("wake-owner-")
 	// Marker-only repairs never start a model turn and therefore do not need
 	// the parent actor to be runnable. A parked/busy parent must not strand a
 	// durable results-consumption repair behind the model-turn admission gate.
@@ -636,7 +663,6 @@ func (s *WakeScheduler) drainRunnable(ctx context.Context, parentSessionID, pare
 		return nil, nil, ErrWakeParentBusy
 	}
 
-	now := s.now().UTC()
 	if admission != nil && !markerOnlyDrain {
 		kept := make([]WakePending, 0, len(pending))
 		for _, w := range pending {
@@ -651,7 +677,20 @@ func (s *WakeScheduler) drainRunnable(ctx context.Context, parentSessionID, pare
 				if decision == RejectStale {
 					consumption = "stale"
 				}
-				_ = s.markConsumed(ctx, w, consumption, reason)
+				owned, claimErr := s.store.ClaimWakePending(ctx, w.WakeID, claimOwner, now)
+				if claimErr != nil {
+					return nil, nil, claimErr
+				}
+				if !owned {
+					continue // another drainer owns this wake now
+				}
+				claimedAt := now
+				w.ClaimedAt = &claimedAt
+				w.ClaimedBy = claimOwner
+				if consumeErr := s.markConsumed(ctx, w, consumption, reason); consumeErr != nil {
+					_, _ = s.store.ReleaseWakePendingOwned(ctx, w.WakeID, claimOwner, s.wakeClaimValidAfter())
+					return nil, nil, consumeErr
+				}
 				continue
 			case RetryAdmission:
 				continue
@@ -705,13 +744,16 @@ func (s *WakeScheduler) drainRunnable(ctx context.Context, parentSessionID, pare
 		if !allowed[class] {
 			continue // budget consumed by a higher-priority class this drain
 		}
-		ok, err := s.store.ClaimWakePending(ctx, w.WakeID, WakeClaimOwner, now)
+		ok, err := s.store.ClaimWakePending(ctx, w.WakeID, claimOwner, now)
 		if err != nil {
 			return claimed, nil, err
 		}
 		if !ok {
 			continue // claimed by a concurrent drainer; skip
 		}
+		claimedAt := now
+		w.ClaimedAt = &claimedAt
+		w.ClaimedBy = claimOwner
 		if w.NotificationSeq > 0 && (firstNotificationSeq == 0 || w.NotificationSeq < firstNotificationSeq) {
 			firstNotificationSeq = w.NotificationSeq
 		}
@@ -785,6 +827,17 @@ func (s *WakeScheduler) markConsumed(ctx context.Context, w WakePending, consump
 	if s == nil || s.store == nil {
 		return nil
 	}
+	if owner := strings.TrimSpace(w.ClaimedBy); owner != "" {
+		return s.store.CommitWakeConsumptionOwned(
+			ctx,
+			[]WakePending{w},
+			owner,
+			s.wakeClaimValidAfter(),
+			s.now().UTC(),
+			consumption,
+			reason,
+		)
+	}
 	if key := strings.TrimSpace(w.NotifyKey); key != "" {
 		if err := s.store.MarkWakeDelivered(ctx, WakeDelivered{
 			NotifyKey:             key,
@@ -846,9 +899,53 @@ func (s *WakeScheduler) ResolveWake(ctx context.Context, wakeID string) error {
 	return s.store.ResolveWakePending(ctx, strings.TrimSpace(wakeID))
 }
 
-// WakeClaimOwner is the claim owner recorded by the scheduler's own drain path.
-// A release must present the same owner so a concurrent drainer's claim is
-// never un-claimed (plan C2-5 / A6).
+// ResolveWakeOwned closes only the wake lease represented by w. A stale
+// consumer cannot remove the row after another drain has acquired it.
+func (s *WakeScheduler) ResolveWakeOwned(ctx context.Context, w WakePending) error {
+	if s == nil || s.store == nil {
+		return nil
+	}
+	won, err := s.store.ResolveWakePendingOwned(ctx, strings.TrimSpace(w.WakeID), strings.TrimSpace(w.ClaimedBy), s.wakeClaimValidAfter())
+	if err != nil {
+		return err
+	}
+	if !won {
+		return ErrWakeClaimFenceLost
+	}
+	return nil
+}
+
+func (s *WakeScheduler) wakeClaimRenewInterval() time.Duration {
+	if s == nil || s.claimStaleAfter <= 0 {
+		return defaultWakeClaimStaleAfter / 3
+	}
+	interval := s.claimStaleAfter / 3
+	if interval < 10*time.Millisecond {
+		interval = 10 * time.Millisecond
+	}
+	if interval >= s.claimStaleAfter {
+		interval = s.claimStaleAfter / 2
+	}
+	return interval
+}
+
+func (s *WakeScheduler) wakeClaimValidAfter() time.Time {
+	now := time.Now().UTC()
+	staleAfter := defaultWakeClaimStaleAfter
+	if s != nil {
+		if s.now != nil {
+			now = s.now().UTC()
+		}
+		if s.claimStaleAfter > 0 {
+			staleAfter = s.claimStaleAfter
+		}
+	}
+	return now.Add(-staleAfter)
+}
+
+// WakeClaimOwner is a stable identity for direct store operations and legacy
+// tests. Scheduler drains use a unique owner token per drain; they must never
+// use this constant as a fencing token.
 const WakeClaimOwner = "wake_scheduler"
 
 // ReleaseWake returns a claimed wake to the pending queue without consuming it
@@ -859,8 +956,14 @@ func (s *WakeScheduler) ReleaseWake(ctx context.Context, wakeID, claimedBy strin
 	if s == nil || s.store == nil {
 		return nil
 	}
-	_, err := s.store.ReleaseWakePending(ctx, strings.TrimSpace(wakeID), strings.TrimSpace(claimedBy))
-	return err
+	won, err := s.store.ReleaseWakePendingOwned(ctx, strings.TrimSpace(wakeID), strings.TrimSpace(claimedBy), s.wakeClaimValidAfter())
+	if err != nil {
+		return err
+	}
+	if !won {
+		return ErrWakeClaimFenceLost
+	}
+	return nil
 }
 
 // WakeQueuePosition is the bounded-FIFO readout for a deferred resume
