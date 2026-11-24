@@ -79,6 +79,42 @@ func TestBashJobFirstReturnsForegroundAndForgetsQuickJob(t *testing.T) {
 	}
 }
 
+func TestBashJobFirstUsesContextRuntimeForSessionScopedTool(t *testing.T) {
+	exitCode := 0
+	runtime := &fakeShellJobRuntime{
+		wait: ShellJobSnapshot{ID: "job_context", Status: "completed", ExitCode: &exitCode},
+		output: ShellJobOutput{
+			Output:   "context runtime output\n",
+			Status:   "completed",
+			ExitCode: &exitCode,
+		},
+	}
+	tool := newTestBashTool()
+	fallbackRuntime := &fakeShellJobRuntime{}
+	tool.SetShellJobRuntime(fallbackRuntime)
+	ctx := toolctx.WithShellJobRuntime(
+		toolctx.WithSessionID(context.Background(), "session-context-job"),
+		runtime,
+	)
+
+	result, err := tool.Execute(ctx, map[string]interface{}{"command": "echo context runtime"})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if result == nil || !result.Success {
+		t.Fatalf("context-bound job runtime failed: %+v", result)
+	}
+	if runtime.submitCommand != "echo context runtime" {
+		t.Fatalf("context runtime did not receive command: %q", runtime.submitCommand)
+	}
+	if fallbackRuntime.submitCommand != "" {
+		t.Fatalf("context runtime did not take precedence over the tool default: %q", fallbackRuntime.submitCommand)
+	}
+	if result.Metadata["job_id"] != "job_fake" {
+		t.Fatalf("context runtime job id missing: %#v", result.Metadata)
+	}
+}
+
 func TestBashJobFirstTimeoutReturnsPromotedJob(t *testing.T) {
 	runtime := &fakeShellJobRuntime{
 		wait: ShellJobSnapshot{ID: "job_slow", Status: "running", TimedOut: true},

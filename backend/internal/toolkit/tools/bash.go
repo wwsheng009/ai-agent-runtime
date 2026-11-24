@@ -225,12 +225,16 @@ type bashCommandBatchItem struct {
 func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (result *toolkit.ToolResult, err error) {
 	defer func() { result = ownShellOutputWindow(ctx, "bash", result) }()
 
+	jobRuntime := b.jobRuntime
+	if contextRuntime, ok := toolctx.ShellJobRuntimeFromContext(ctx).(ShellJobRuntime); ok && contextRuntime != nil {
+		jobRuntime = contextRuntime
+	}
 	commands, batchRequested, err := parseBashCommandBatch(params)
 	if err != nil {
 		return &toolkit.ToolResult{Success: false, OutputKind: toolresult.KindText, Error: err}, nil
 	}
 	if batchRequested {
-		if b.batchExecutor != nil && b.jobRuntime == nil {
+		if b.batchExecutor != nil && jobRuntime == nil {
 			return b.batchExecutor(ctx, params, commands)
 		}
 		return toolResultFailureWithCode(
@@ -340,7 +344,7 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 
 	// Every shell call is a job. There is no direct process fallback: a host
 	// that did not inject the shared manager fails closed.
-	if b.jobRuntime == nil {
+	if jobRuntime == nil {
 		if b.directExecutor != nil {
 			return b.directExecutor(ctx, b, command, effectiveWorkdir, timeout, string(timeoutSource), captureSettings, mutatedPaths)
 		}
@@ -354,7 +358,7 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 			},
 		), nil
 	}
-	return b.executeJobFirst(ctx, command, effectiveWorkdir, timeout, string(timeoutSource), captureSettings, mutatedPaths)
+	return b.executeJobFirst(ctx, jobRuntime, command, effectiveWorkdir, timeout, string(timeoutSource), captureSettings, mutatedPaths)
 
 }
 
@@ -362,7 +366,7 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 // before it runs; a wait timeout returns a promoted result instead of killing
 // the process. A terminal quick command is forgotten so it never becomes a
 // model-visible orphan.
-func (b *BashTool) executeJobFirst(ctx context.Context, command, workdir string, timeout time.Duration, timeoutSource string, captureSettings outputCaptureSettings, mutatedPaths []string) (*toolkit.ToolResult, error) {
+func (b *BashTool) executeJobFirst(ctx context.Context, jobRuntime ShellJobRuntime, command, workdir string, timeout time.Duration, timeoutSource string, captureSettings outputCaptureSettings, mutatedPaths []string) (*toolkit.ToolResult, error) {
 	sessionID := strings.TrimSpace(toolctx.SessionID(ctx))
 	if sessionID == "" {
 		return toolResultFailureWithCode(
@@ -396,7 +400,7 @@ func (b *BashTool) executeJobFirst(ctx context.Context, command, workdir string,
 	if limit < 0 {
 		limit = 0
 	}
-	execution, execErr := shelljob.Execute(ctx, b.jobRuntime, shelljob.Request{
+	execution, execErr := shelljob.Execute(ctx, jobRuntime, shelljob.Request{
 		SessionID:   sessionID,
 		Command:     command,
 		Workdir:     workdir,

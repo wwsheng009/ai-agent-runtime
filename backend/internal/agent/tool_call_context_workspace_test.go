@@ -4,6 +4,9 @@ import (
 	"context"
 	"testing"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/background"
+	"github.com/wwsheng009/ai-agent-runtime/internal/shelljob"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
 )
 
@@ -54,5 +57,33 @@ func TestApprovedToolCallContextCarriesWorkspaceRoot(t *testing.T) {
 	}
 	if got := toolctx.WorkspaceRoot(approvedToolCallContext(context.Background(), nil)); got != "" {
 		t.Fatalf("expected empty workspace root without an agent, got %q", got)
+	}
+}
+
+func TestToolCallContextsCarryBrokerShellJobRuntime(t *testing.T) {
+	manager := background.NewManager(background.Config{})
+	t.Cleanup(func() { _ = manager.Close() })
+
+	agent := &Agent{
+		config:     &Config{Options: map[string]interface{}{}},
+		toolBroker: &toolbroker.Broker{Background: manager},
+	}
+	contexts := map[string]context.Context{
+		"normal tool call": toolCallContext(context.Background(), nil, "", nil, agent, "session-job-runtime", 0),
+		"approved replay":  approvedToolCallContext(context.Background(), agent),
+	}
+	for name, ctx := range contexts {
+		if runtime := toolctx.ShellJobRuntimeFromContext(ctx); runtime == nil {
+			t.Errorf("%s did not receive the broker's shell job runtime", name)
+		}
+	}
+
+	// When this agent has no broker runtime, context passed in by the caller
+	// remains usable instead of being shadowed by a nil host binding.
+	existingRuntime := shelljob.NewManagerRuntime(manager)
+	bound := toolctx.WithShellJobRuntime(context.Background(), existingRuntime)
+	got := toolctx.ShellJobRuntimeFromContext(toolCallContext(bound, nil, "", nil, &Agent{config: &Config{}}, "session-job-runtime", 0))
+	if got != existingRuntime {
+		t.Fatal("toolCallContext replaced the caller's shell job runtime")
 	}
 }

@@ -59,6 +59,9 @@ func approvedToolCallContext(ctx context.Context, agent *Agent) context.Context 
 	if shellRuntime := shellRuntimeForAgent(agent); shellRuntime != nil {
 		ctx = toolctx.WithShellRuntime(ctx, shellRuntime)
 	}
+	if shellJobRuntime := shellJobRuntimeForAgent(agent); shellJobRuntime != nil {
+		ctx = toolctx.WithShellJobRuntime(ctx, shellJobRuntime)
+	}
 	if allowedRoots := toolAllowedRootsForAgent(agent); len(allowedRoots) > 0 {
 		ctx = toolctx.WithAllowedRoots(ctx, allowedRoots)
 	}

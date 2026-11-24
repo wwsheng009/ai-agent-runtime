@@ -6,6 +6,7 @@ import (
 
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/knowledge"
+	"github.com/wwsheng009/ai-agent-runtime/internal/shelljob"
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolargs"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolexec"
@@ -22,6 +23,21 @@ func shellRuntimeForAgent(agent *Agent) *runtimeexecutor.ShellRuntime {
 	}
 	runtime, _ := agent.config.Options["shell_runtime"].(*runtimeexecutor.ShellRuntime)
 	return runtime
+}
+
+// shellJobRuntimeForAgent adapts the session's shared background manager for
+// shell tools. This context-level binding covers per-workspace/profile MCP
+// managers whose tool instances are not the process-wide manager receiving
+// SetShellJobRuntime.
+func shellJobRuntimeForAgent(agent *Agent) shelljob.Runtime {
+	if agent == nil {
+		return nil
+	}
+	broker := agent.GetToolBroker()
+	if broker == nil || broker.Background == nil {
+		return nil
+	}
+	return shelljob.NewManagerRuntime(broker.Background)
 }
 
 // bindFreeformToolCall resolves a custom tool's raw input against its schema

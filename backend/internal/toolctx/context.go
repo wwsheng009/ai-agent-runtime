@@ -22,6 +22,7 @@ const (
 	generatedImageOutputDirKey contextKey = "generated_image_output_dir"
 	shellOutputArtifactDirKey  contextKey = "shell_output_artifact_dir"
 	shellRuntimeKey            contextKey = "tool_shell_runtime"
+	shellJobRuntimeKey         contextKey = "tool_shell_job_runtime"
 	workspaceRootKey           contextKey = "tool_workspace_root"
 	allowedRootsKey            contextKey = "tool_allowed_roots"
 	artifactStoreKey           contextKey = "tool_artifact_store"
@@ -216,6 +217,29 @@ func ShellRuntimeFromContext(ctx context.Context) *runtimeexecutor.ShellRuntime 
 	}
 	runtime, _ := ctx.Value(shellRuntimeKey).(*runtimeexecutor.ShellRuntime)
 	return runtime
+}
+
+// WithShellJobRuntime binds the manager-backed job runtime to the tool
+// execution context. Session-scoped tool surfaces may be distinct instances
+// from the process-wide MCP manager, so shell execution must not depend only on
+// mutating the tool object's process-shared fields.
+func WithShellJobRuntime(ctx context.Context, runtime interface{}) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if runtime == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, shellJobRuntimeKey, runtime)
+}
+
+// ShellJobRuntimeFromContext retrieves the manager-backed shell job runtime,
+// or nil when the host did not bind one.
+func ShellJobRuntimeFromContext(ctx context.Context) interface{} {
+	if ctx == nil {
+		return nil
+	}
+	return ctx.Value(shellJobRuntimeKey)
 }
 
 // WithWorkspaceRoot stores the session-bound filesystem root in ctx. Tools use
