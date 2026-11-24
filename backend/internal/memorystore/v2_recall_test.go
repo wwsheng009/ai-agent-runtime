@@ -154,6 +154,37 @@ func TestSelectForInjectV2NoMatchKeepsEmptySelection(t *testing.T) {
 	require.Empty(t, selection.Dropped)
 }
 
+func TestSelectForInjectV2IncludesEntityOnlyHybridMatch(t *testing.T) {
+	ctx := context.Background()
+	store, err := New(Config{
+		ProjectRoot: t.TempDir(), Mode: "on", InjectionMode: "notes",
+		PinnedBudgetRatio: 0.2,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	record, err := store.InsertCandidate(ctx, Candidate{
+		SessionID: "s1", Kind: "fact", Text: "deployment uses a strict approval protocol",
+		Confidence: 0.9, SourceHash: "hash-entity-recall", SourceRevision: 1,
+	})
+	require.NoError(t, err)
+	record, err = store.PromoteCandidate(ctx, record.ID)
+	require.NoError(t, err)
+	_, err = store.LinkRecordEntity(ctx, record.ID, EntityLink{
+		CanonicalName: "AliasOnlyEntity", EntityType: "project",
+		Aliases: []string{"AliasOnlyEntity"}, Relation: "mentions", Confidence: 0.9,
+	})
+	require.NoError(t, err)
+
+	selection, err := store.SelectForInjectV2(InjectOptions{
+		Query: "AliasOnlyEntity", Limit: 5, TokenBudget: 600, SkipTrace: true,
+	})
+	require.NoError(t, err)
+	require.Len(t, selection.Recall, 1)
+	require.Equal(t, record.ID, selection.Recall[0].ID,
+		"automatic injection must accept an entity-only match from the unified hybrid search path")
+}
+
 func TestSelectForInjectV2HydratesSelectedRecordAndPreservesFittedText(t *testing.T) {
 	ctx := context.Background()
 	store, err := New(Config{

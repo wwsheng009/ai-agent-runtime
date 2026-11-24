@@ -47,9 +47,9 @@ SELECT src.id, src.memory_id, src.source_kind, src.source_id,
        src.created_at
 FROM memory_sources src
 JOIN memory_entries e ON e.id = src.memory_id
-WHERE src.memory_id = ? AND e.project_key = ?
+WHERE src.memory_id = ? AND e.tenant_id = ? AND e.project_key = ?
 ORDER BY src.created_at DESC, src.id DESC
-`, memoryID, s.cfg.ProjectKey)
+`, memoryID, s.tenantID(), s.cfg.ProjectKey)
 	if err != nil {
 		return nil, fmt.Errorf("memorystore: list record sources: %w", err)
 	}
@@ -176,17 +176,19 @@ func (s *Store) ListExtractionDiagnostics(ctx context.Context, jobID string, lim
 	if limit > maxExtractionDiagnosticsPerWrite {
 		limit = maxExtractionDiagnosticsPerWrite
 	}
-	args := []interface{}{s.cfg.ProjectKey}
+	args := []interface{}{s.tenantID(), s.cfg.ProjectKey, s.cfg.ProjectKey}
 	query := `
-SELECT id, project_key, job_id, session_id, session_generation, turn_id,
-       reason, summary, source_ids_json, created_at
-FROM memory_extraction_diagnostics
-WHERE project_key = ?`
+SELECT d.id, d.project_key, d.job_id, d.session_id, d.session_generation, d.turn_id,
+       d.reason, d.summary, d.source_ids_json, d.created_at
+FROM memory_extraction_diagnostics d
+JOIN memory_jobs j
+  ON j.id = d.job_id AND j.tenant_id = ? AND j.project_key = ?
+WHERE d.project_key = ?`
 	if jobID = strings.TrimSpace(jobID); jobID != "" {
-		query += " AND job_id = ?"
+		query += " AND d.job_id = ?"
 		args = append(args, jobID)
 	}
-	query += " ORDER BY created_at DESC, id DESC LIMIT ?"
+	query += " ORDER BY d.created_at DESC, d.id DESC LIMIT ?"
 	args = append(args, limit)
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {

@@ -96,7 +96,7 @@ func (s *Store) MaterializeTurnCapture(ctx context.Context, capture TurnCapture)
 	if err := validateMaintenanceLeaseTx(ctx, tx, capture.ProjectKey); err != nil {
 		return TurnCaptureMaterialization{}, err
 	}
-	if err := checkSessionPurgeGenerationTx(ctx, tx, capture.ProjectKey,
+	if err := checkSessionPurgeGenerationTx(ctx, tx, s.tenantID(), capture.ProjectKey,
 		capture.SessionID, capture.SessionGeneration); err != nil {
 		return TurnCaptureMaterialization{}, err
 	}
@@ -109,9 +109,10 @@ SELECT d.id, COALESCE(d.capture_receipt_id, ''), d.message_seq_start, d.message_
 FROM memory_turn_digests
        AS d
 LEFT JOIN memory_turn_capture_generations g
-  ON g.project_key = d.project_key AND g.capture_receipt_id = d.capture_receipt_id
-WHERE d.project_key = ? AND d.capture_receipt_id = ?
-`, capture.ProjectKey, capture.ID).Scan(
+  ON g.tenant_id = d.tenant_id AND g.project_key = d.project_key
+     AND g.capture_receipt_id = d.capture_receipt_id
+WHERE d.tenant_id = ? AND d.project_key = ? AND d.capture_receipt_id = ?
+`, s.tenantID(), capture.ProjectKey, capture.ID).Scan(
 		&existingDigestID, &existingReceiptID, &existingSeqStart, &existingSeqEnd,
 		&existingRevision, &existingRangeHash, &existingSessionID, &existingTurnID,
 		&existingGeneration,
@@ -140,10 +141,10 @@ WHERE d.project_key = ? AND d.capture_receipt_id = ?
 	err = tx.QueryRowContext(ctx, `
 SELECT session_generation
 FROM memory_turn_digests
-WHERE project_key = ? AND session_id = ? AND turn_id = ?
+WHERE tenant_id = ? AND project_key = ? AND session_id = ? AND turn_id = ?
   AND capture_receipt_id <> ?
 LIMIT 1
-`, capture.ProjectKey, capture.SessionID, capture.TurnID, capture.ID).Scan(&otherTurnGeneration)
+`, s.tenantID(), capture.ProjectKey, capture.SessionID, capture.TurnID, capture.ID).Scan(&otherTurnGeneration)
 	if err != nil && err != sql.ErrNoRows {
 		return TurnCaptureMaterialization{}, fmt.Errorf("memorystore: check turn generation: %w", err)
 	}
@@ -155,7 +156,8 @@ LIMIT 1
 	}
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO memory_turn_digests (
-     id, scope, project_key, session_id, turn_id, trace_id,
+     id, scope, project_key, tenant_id, scope_kind, scope_key,
+     session_id, turn_id, trace_id,
      session_generation,
      parent_session_id, agent_type, user_message_id, assistant_message_id,
     message_seq_start, message_seq_end, capture_receipt_id, source_revision,
@@ -163,10 +165,11 @@ INSERT INTO memory_turn_digests (
     outcome, steps, usage_json, metadata_json, digest_hash, digest_revision,
     status, process_job_id, last_error, rollup_status, rollup_window_id,
     rolled_up_at, created_at, updated_at, processed_at
- ) VALUES (?, 'project', ?, ?, ?, ?, ?, '', '', ?, ?, ?, ?, ?, ?, ?, ?, '', '', 0,
+ ) VALUES (?, 'project', ?, ?, 'project', ?, ?, ?, ?, ?, '', '', ?, ?, ?, ?, ?, ?, ?, ?, '', '', 0,
            ?, ?, ?, ?, ?, 1, 'pending', NULL, NULL, 'pending', NULL, NULL, ?, ?, NULL)
-ON CONFLICT(project_key, capture_receipt_id) WHERE capture_receipt_id <> '' DO NOTHING
-	`, digestID, capture.ProjectKey, capture.SessionID, capture.TurnID,
+ON CONFLICT(tenant_id, project_key, capture_receipt_id) WHERE capture_receipt_id <> '' DO NOTHING
+	`, digestID, capture.ProjectKey, s.tenantID(), capture.ProjectKey,
+		capture.SessionID, capture.TurnID,
 		capture.TraceID, capture.SessionGeneration, capture.UserMessageID, capture.AssistantMessageID,
 		capture.MessageSeqStart, capture.MessageSeqEnd, capture.ID,
 		capture.CanonicalRevision, capture.RangeHash, now.Format(time.RFC3339Nano),
@@ -181,8 +184,8 @@ ON CONFLICT(project_key, capture_receipt_id) WHERE capture_receipt_id <> '' DO N
 SELECT id, COALESCE(capture_receipt_id, ''), message_seq_start, message_seq_end,
        source_revision, COALESCE(range_hash, ''), session_id, turn_id, session_generation
 FROM memory_turn_digests
-WHERE project_key = ? AND capture_receipt_id = ?
-`, capture.ProjectKey, capture.ID).Scan(
+WHERE tenant_id = ? AND project_key = ? AND capture_receipt_id = ?
+`, s.tenantID(), capture.ProjectKey, capture.ID).Scan(
 		&existingDigestID, &existingReceiptID, &existingSeqStart, &existingSeqEnd,
 		&existingRevision, &existingRangeHash, &existingSessionID, &existingTurnID,
 		&existingGeneration,
@@ -206,36 +209,38 @@ INSERT OR IGNORE INTO memory_jobs (
     id, kind, job_key, scope, project_key, status, priority, attempt,
     max_attempts, retry_at, last_error, input_watermark, created_at, updated_at,
     session_id, session_generation, capture_receipt_id, source_start_seq,
-    source_end_seq, source_revision, source_hash, available_at, deadline_at, repair_only
+    source_end_seq, source_revision, source_hash, available_at, deadline_at, repair_only,
+    tenant_id, scope_kind, scope_key
  ) VALUES (?, 'phase1_extract/v2', ?, 'project', ?, 'pending', ?, 0, 3,
-            NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+            NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 'project', ?)
  `, jobID, jobKey, capture.ProjectKey, JobPriorityPhase1ExtractV2, capture.ID,
 		capture.CreatedAt.UTC().Format(time.RFC3339Nano), now.Format(time.RFC3339Nano),
 		capture.SessionID, capture.SessionGeneration, capture.ID, capture.MessageSeqStart,
 		capture.MessageSeqEnd, capture.CanonicalRevision, capture.RangeHash,
-		now.Format(time.RFC3339Nano), now.Add(DefaultMemoryJobTimeout).Format(time.RFC3339Nano)); err != nil {
+		now.Format(time.RFC3339Nano), now.Add(DefaultMemoryJobTimeout).Format(time.RFC3339Nano),
+		s.tenantID(), capture.ProjectKey); err != nil {
 		return TurnCaptureMaterialization{}, fmt.Errorf("memorystore: materialize turn job: %w", err)
 	}
 	if err := tx.QueryRowContext(ctx, `
 SELECT id FROM memory_jobs
-WHERE kind = 'phase1_extract/v2' AND scope = 'project' AND project_key = ? AND job_key = ?
-`, capture.ProjectKey, jobKey).Scan(&jobID); err != nil {
+WHERE tenant_id = ? AND kind = 'phase1_extract/v2' AND scope = 'project' AND project_key = ? AND job_key = ?
+`, s.tenantID(), capture.ProjectKey, jobKey).Scan(&jobID); err != nil {
 		return TurnCaptureMaterialization{}, fmt.Errorf("memorystore: resolve turn job: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `
 UPDATE memory_turn_digests
 SET process_job_id = ?, enqueued_at = COALESCE(enqueued_at, ?), updated_at = ?
-WHERE id = ? AND project_key = ? AND capture_receipt_id = ?
+WHERE tenant_id = ? AND id = ? AND project_key = ? AND capture_receipt_id = ?
 `, jobID, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano),
-		digestID, capture.ProjectKey, capture.ID); err != nil {
+		s.tenantID(), digestID, capture.ProjectKey, capture.ID); err != nil {
 		return TurnCaptureMaterialization{}, fmt.Errorf("memorystore: link turn job: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `
  INSERT INTO memory_turn_capture_generations(
-     project_key, capture_receipt_id, session_id, turn_id, generation, created_at
- ) VALUES (?, ?, ?, ?, ?, ?)
- ON CONFLICT(project_key, capture_receipt_id) DO NOTHING
- `, capture.ProjectKey, capture.ID, capture.SessionID, capture.TurnID,
+     tenant_id, project_key, capture_receipt_id, session_id, turn_id, generation, created_at
+ ) VALUES (?, ?, ?, ?, ?, ?, ?)
+ ON CONFLICT(tenant_id, project_key, capture_receipt_id) DO NOTHING
+ `, s.tenantID(), capture.ProjectKey, capture.ID, capture.SessionID, capture.TurnID,
 		capture.SessionGeneration, now.Format(time.RFC3339Nano)); err != nil {
 		return TurnCaptureMaterialization{}, fmt.Errorf("memorystore: bind turn capture generation: %w", err)
 	}
@@ -244,8 +249,8 @@ WHERE id = ? AND project_key = ? AND capture_receipt_id = ?
 	if err := tx.QueryRowContext(ctx, `
  SELECT session_id, turn_id, generation
  FROM memory_turn_capture_generations
- WHERE project_key = ? AND capture_receipt_id = ?
- `, capture.ProjectKey, capture.ID).Scan(
+ WHERE tenant_id = ? AND project_key = ? AND capture_receipt_id = ?
+ `, s.tenantID(), capture.ProjectKey, capture.ID).Scan(
 		&storedCaptureSession, &storedCaptureTurn, &storedCaptureGeneration,
 	); err != nil {
 		return TurnCaptureMaterialization{}, fmt.Errorf("memorystore: resolve turn capture generation: %w", err)
@@ -419,7 +424,7 @@ func (s *Store) commitTurnCaptureExtraction(
 	if err := validateMaintenanceLeaseTx(ctx, tx, capture.ProjectKey); err != nil {
 		return 0, err
 	}
-	if err := checkSessionPurgeGenerationTx(ctx, tx, capture.ProjectKey,
+	if err := checkSessionPurgeGenerationTx(ctx, tx, s.tenantID(), capture.ProjectKey,
 		capture.SessionID, capture.SessionGeneration); err != nil {
 		return 0, err
 	}
@@ -433,8 +438,8 @@ func (s *Store) commitTurnCaptureExtraction(
 	err = tx.QueryRowContext(ctx, `
 	SELECT session_id, turn_id, generation
 	FROM memory_turn_capture_generations
-	WHERE project_key = ? AND capture_receipt_id = ?
-	`, capture.ProjectKey, capture.ID).Scan(
+	WHERE tenant_id = ? AND project_key = ? AND capture_receipt_id = ?
+	`, s.tenantID(), capture.ProjectKey, capture.ID).Scan(
 		&boundSessionID, &boundTurnID, &boundGeneration,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -454,9 +459,9 @@ func (s *Store) commitTurnCaptureExtraction(
 	SELECT session_id, turn_id, capture_receipt_id, digest_id, job_id,
 	       source_revision, range_hash, output_hash, candidate_count
 	FROM memory_turn_output_receipts
-	WHERE project_key = ? AND capture_receipt_id = ?
+	WHERE tenant_id = ? AND project_key = ? AND capture_receipt_id = ?
 	  AND source_revision = ? AND range_hash = ?
-	`, capture.ProjectKey, capture.ID, capture.CanonicalRevision, capture.RangeHash).Scan(
+	`, s.tenantID(), capture.ProjectKey, capture.ID, capture.CanonicalRevision, capture.RangeHash).Scan(
 		&outputSessionID, &outputTurnID, &outputReceiptID, &outputDigestID, &outputJobID,
 		&outputRevision, &outputRangeHash, &storedOutputHash, &outputCandidateCount,
 	)
@@ -480,9 +485,9 @@ func (s *Store) commitTurnCaptureExtraction(
 	SELECT status, COALESCE(worker_id, ''), COALESCE(lease_until, ''), attempt,
 	       session_id, session_generation, capture_receipt_id, source_start_seq,
 	       source_end_seq, source_revision, source_hash
-	FROM memory_jobs
-	WHERE id = ? AND kind = 'phase1_extract/v2' AND project_key = ?
-	`, jobID, capture.ProjectKey).Scan(
+FROM memory_jobs
+WHERE tenant_id = ? AND id = ? AND kind = 'phase1_extract/v2' AND project_key = ?
+	`, s.tenantID(), jobID, capture.ProjectKey).Scan(
 		&jobStatus, &jobWorker, &jobLeaseUntil, &storedAttempt,
 		&jobSessionID, &jobGeneration, &jobReceiptID, &jobSourceStart,
 		&jobSourceEnd, &jobSourceRevision, &jobSourceHash,
@@ -506,9 +511,9 @@ func (s *Store) commitTurnCaptureExtraction(
 	       COALESCE(process_job_id, ''), status, session_generation,
 	       message_seq_start, message_seq_end
 	FROM memory_turn_digests
-	WHERE project_key = ? AND session_id = ? AND session_generation = ?
+	WHERE tenant_id = ? AND project_key = ? AND session_id = ? AND session_generation = ?
 	  AND turn_id = ? AND capture_receipt_id = ?
-	`, capture.ProjectKey, capture.SessionID, capture.SessionGeneration, capture.TurnID, capture.ID).Scan(
+	`, s.tenantID(), capture.ProjectKey, capture.SessionID, capture.SessionGeneration, capture.TurnID, capture.ID).Scan(
 		&storedDigestID, &storedReceiptID, &storedRevision, &storedRangeHash,
 		&storedProcessJobID, &status, &storedGeneration, &storedSeqStart, &storedSeqEnd,
 	); err != nil {
@@ -549,12 +554,13 @@ func (s *Store) commitTurnCaptureExtraction(
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO memory_turn_output_receipts (
     id, project_key, session_id, turn_id, capture_receipt_id, digest_id, job_id,
-    source_revision, range_hash, output_hash, candidate_count, created_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    source_revision, range_hash, output_hash, candidate_count, created_at,
+    tenant_id, scope_kind, scope_key
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'project', ?)
 	ON CONFLICT(project_key, capture_receipt_id, source_revision, range_hash) DO NOTHING
 `, "tout_"+turnCaptureOutputID(capture), capture.ProjectKey, capture.SessionID, capture.TurnID,
 		capture.ID, digestID, jobID, capture.CanonicalRevision, capture.RangeHash,
-		outputHash, inserted, now.Format(time.RFC3339Nano)); err != nil {
+		outputHash, inserted, now.Format(time.RFC3339Nano), s.tenantID(), capture.ProjectKey); err != nil {
 		return 0, fmt.Errorf("memorystore: write turn output receipt: %w", err)
 	}
 	res, err := tx.ExecContext(ctx, `
@@ -562,8 +568,9 @@ UPDATE memory_jobs
 	SET status = 'succeeded', worker_id = NULL, lease_until = NULL,
 	    deadline_at = NULL, heartbeat_at = NULL, finished_at = ?,
     last_success_watermark = ?, updated_at = ?
-WHERE id = ? AND status = 'running' AND worker_id = ? AND attempt = ? AND kind = 'phase1_extract/v2'
-	`, now.Format(time.RFC3339Nano), nullableString(outputHash), now.Format(time.RFC3339Nano), jobID, workerID, claimAttempt)
+WHERE tenant_id = ? AND id = ? AND status = 'running' AND worker_id = ? AND attempt = ? AND kind = 'phase1_extract/v2'
+	`, now.Format(time.RFC3339Nano), nullableString(outputHash), now.Format(time.RFC3339Nano),
+		s.tenantID(), jobID, workerID, claimAttempt)
 	if err != nil {
 		return 0, fmt.Errorf("memorystore: complete turn extraction job: %w", err)
 	}
@@ -575,12 +582,12 @@ UPDATE memory_turn_digests
 SET user_text = ?, assistant_text = ?, text_truncated = ?,
     status = 'done', process_job_id = ?, last_error = NULL,
     processed_at = ?, updated_at = ?
-WHERE id = ? AND project_key = ? AND capture_receipt_id = ?
+WHERE tenant_id = ? AND id = ? AND project_key = ? AND capture_receipt_id = ?
   AND source_revision = ? AND range_hash = ?
   AND status IN ('pending', 'processing')
 `, digestText.UserText, digestText.AssistantText, boolInt(digestText.TextTruncated),
 		jobID, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano),
-		digestID, capture.ProjectKey, capture.ID, capture.CanonicalRevision, capture.RangeHash)
+		s.tenantID(), digestID, capture.ProjectKey, capture.ID, capture.CanonicalRevision, capture.RangeHash)
 	if err != nil {
 		return 0, fmt.Errorf("memorystore: complete turn digest: %w", err)
 	}

@@ -5,11 +5,79 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	"github.com/wwsheng009/ai-agent-runtime/internal/memorystore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
 )
+
+func TestMemoryG4ReadOnlyTools(t *testing.T) {
+	cfg := memoryToolTestConfig(t)
+	ctx := toolctx.WithSessionID(context.Background(), "session-tools")
+	store, err := memorystore.New(memorystore.Config{
+		ProjectRoot: cfg.Workspace.Root, Mode: "on",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	for _, taskID := range []string{"task-a", "task-b"} {
+		_, err = store.CreateEpisode(ctx, memorystore.EpisodeInput{
+			TaskID: taskID, SessionID: "session-tools",
+			Problem: "recurring deployment problem", Result: "resolved",
+			Outcome:        memorystore.EpisodeOutcomeSuccess,
+			SourceEventIDs: []string{"event-" + taskID},
+			EndedAt:        time.Now().UTC(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	dream, err := store.RunDreamPipeline(ctx, memorystore.DreamRunOptions{
+		Limit: 10, CreatedBy: "test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	patches, err := store.ListPatches(ctx, memorystore.PatchFilter{Status: memorystore.PatchStatusProposed, Limit: 10})
+	if err != nil || len(patches) != 1 {
+		t.Fatalf("seed patches = %+v, %v", patches, err)
+	}
+
+	episodesResult, err := NewMemoryEpisodesTool(cfg).Execute(ctx, map[string]interface{}{
+		"session_id": "session-tools",
+	})
+	if err != nil || !episodesResult.Success ||
+		!strings.Contains(episodesResult.Content, "task-a") ||
+		!strings.Contains(episodesResult.Content, "task-b") {
+		t.Fatalf("memory_episodes = %+v, %v", episodesResult, err)
+	}
+	patchesResult, err := NewMemoryPatchesTool(cfg).Execute(ctx, map[string]interface{}{
+		"status": "proposed",
+	})
+	if err != nil || !patchesResult.Success || !strings.Contains(patchesResult.Content, patches[0].ID) {
+		t.Fatalf("memory_patches = %+v, %v", patchesResult, err)
+	}
+	patchResult, err := NewMemoryPatchReadTool(cfg).Execute(ctx, map[string]interface{}{
+		"id": patches[0].ID,
+	})
+	if err != nil || !patchResult.Success || !strings.Contains(patchResult.Content, "Review this reflection") {
+		t.Fatalf("memory_patch_read = %+v, %v", patchResult, err)
+	}
+	dreamsResult, err := NewMemoryDreamsTool(cfg).Execute(ctx, map[string]interface{}{})
+	if err != nil || !dreamsResult.Success || !strings.Contains(dreamsResult.Content, dream.ID) {
+		t.Fatalf("memory_dreams = %+v, %v", dreamsResult, err)
+	}
+
+	crossSession, err := NewMemoryEpisodesTool(cfg).Execute(ctx, map[string]interface{}{
+		"session_id": "another-session",
+	})
+	if err != nil || crossSession.Success {
+		t.Fatalf("cross-session memory_episodes must fail: %+v, %v", crossSession, err)
+	}
+}
 
 func memoryToolTestConfig(t *testing.T) *runtimecfg.RuntimeConfig {
 	t.Helper()

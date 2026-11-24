@@ -122,6 +122,82 @@ func TestMemoryAPIRecordsLifecycleAndStatus(t *testing.T) {
 	require.Equal(t, 0, listed.Count)
 }
 
+func TestMemoryAPIMultiValueKindTagFilters(t *testing.T) {
+	workspace := t.TempDir()
+	_, router := newMemoryTestRouter(t, workspace)
+
+	createRecord := func(text, kind string, tags []string) string {
+		t.Helper()
+		body, err := json.Marshal(map[string]interface{}{
+			"text": text, "kind": kind, "tags": tags, "session_id": "multi-value-session",
+		})
+		require.NoError(t, err)
+		req := httptest.NewRequest(http.MethodPost, "/api/runtime/memory/records", strings.NewReader(string(body)))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Skills-Admin-Token", "memory-admin")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var created memoryRecordDTO
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&created))
+		require.NotEmpty(t, created.ID)
+		return created.ID
+	}
+
+	decisionBoth := createRecord("multi-value decision with both tags", "decision", []string{"alpha", "beta"})
+	factBoth := createRecord("multi-value fact with both tags", "fact", []string{"alpha", "beta"})
+	decisionAlpha := createRecord("multi-value decision with alpha only", "decision", []string{"alpha"})
+
+	list := func(values url.Values) []string {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/api/runtime/memory/records?"+values.Encode(), nil)
+		req.Header.Set("X-Skills-Admin-Token", "memory-admin")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var response memoryRecordListResponse
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&response))
+		ids := make([]string, 0, len(response.Items))
+		for _, item := range response.Items {
+			ids = append(ids, item.ID)
+		}
+		return ids
+	}
+
+	repeated := url.Values{}
+	repeated.Add("kind", "decision")
+	repeated.Add("kind", "fact")
+	repeated.Add("tag", "alpha")
+	repeated.Add("tag", "beta")
+	require.ElementsMatch(t, []string{decisionBoth, factBoth}, list(repeated))
+
+	commaSeparated := url.Values{}
+	commaSeparated.Set("kind", "decision,fact")
+	commaSeparated.Set("tag", "alpha")
+	require.ElementsMatch(t, []string{decisionBoth, factBoth, decisionAlpha}, list(commaSeparated))
+
+	search := url.Values{}
+	search.Set("q", "multi-value")
+	search.Add("kind", "fact")
+	search.Add("tag", "beta")
+	require.ElementsMatch(t, []string{factBoth}, list(search))
+
+	store, err := memorystore.New(memorystore.Config{ProjectRoot: workspace, Mode: "on"})
+	require.NoError(t, err)
+	candidate, err := store.InsertCandidate(context.Background(), memorystore.Candidate{
+		SessionID: "multi-value-session", Kind: "fact", Text: "multi-value candidate",
+		Tags: []string{"alpha", "beta"}, Confidence: 0.9,
+		SourceHash: "multi-value-candidate", SourceRevision: 1,
+	})
+	require.NoError(t, err)
+	require.NoError(t, store.Close())
+
+	statuses := url.Values{}
+	statuses.Add("status", "active")
+	statuses.Add("status", "candidate")
+	require.ElementsMatch(t, []string{decisionBoth, factBoth, decisionAlpha, candidate.ID}, list(statuses))
+}
+
 func TestMemoryAPICoreReadUsesReviewedActiveCoreAndHidesInvalidationDetails(t *testing.T) {
 	workspace := t.TempDir()
 	handler, router := newMemoryTestRouter(t, workspace)
@@ -637,7 +713,7 @@ func TestMemoryAPIRollbackAuthorizationWorkspaceAndValidation(t *testing.T) {
 	wrongWorkspaceHistory.Header.Set("X-Skills-Admin-Token", "memory-admin")
 	wrongWorkspaceHistoryRec := httptest.NewRecorder()
 	router.ServeHTTP(wrongWorkspaceHistoryRec, wrongWorkspaceHistory)
-	require.Equal(t, http.StatusBadRequest, wrongWorkspaceHistoryRec.Code)
+	require.Equal(t, http.StatusNotFound, wrongWorkspaceHistoryRec.Code)
 
 	requestRollback := func(body string) *httptest.ResponseRecorder {
 		t.Helper()
@@ -668,7 +744,7 @@ func TestMemoryAPIRollbackAuthorizationWorkspaceAndValidation(t *testing.T) {
 	wrongWorkspaceRollback.Header.Set("X-Skills-Admin-Token", "memory-admin")
 	wrongWorkspaceRollbackRec := httptest.NewRecorder()
 	router.ServeHTTP(wrongWorkspaceRollbackRec, wrongWorkspaceRollback)
-	require.Equal(t, http.StatusBadRequest, wrongWorkspaceRollbackRec.Code)
+	require.Equal(t, http.StatusNotFound, wrongWorkspaceRollbackRec.Code)
 
 	// Rejections above must not have created a new revision.
 	historyReq := httptest.NewRequest(http.MethodGet,
@@ -1082,7 +1158,24 @@ func TestMemoryAPIWorkspaceBindingAndAdmin(t *testing.T) {
 	req.Header.Set("X-Skills-Admin-Token", "memory-admin")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
-	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var created memoryRecordDTO
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&created))
+
+	otherStore, err := memorystore.New(memorystore.Config{ProjectRoot: other, Mode: "on"})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, otherStore.Close()) })
+	_, err = otherStore.GetRecord(context.Background(), created.ID)
+	require.NoError(t, err)
+
+	configuredStore, err := memorystore.New(memorystore.Config{ProjectRoot: workspace, Mode: "on"})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, configuredStore.Close()) })
+	configuredPage, err := configuredStore.ListRecords(context.Background(), memorystore.RecordFilter{Limit: 10})
+	require.NoError(t, err)
+	for _, item := range configuredPage.Items {
+		require.NotEqual(t, created.ID, item.ID)
+	}
 
 	missing := httptest.NewRequest(http.MethodDelete, "/api/runtime/memory/records/missing", nil)
 	missingRec := httptest.NewRecorder()
@@ -1831,6 +1924,11 @@ func TestMemoryAPIEvidenceAndExtractionDiagnosticsAreAdminOnly(t *testing.T) {
 	workspace := t.TempDir()
 	_, router := newMemoryTestRouter(t, workspace)
 	store, err := memorystore.New(memorystore.Config{ProjectRoot: workspace, Mode: "on"})
+	require.NoError(t, err)
+	_, err = store.EnsureJob(context.Background(), memorystore.MemoryJob{
+		ID: "evidence-api-job", Kind: "phase1_extract", JobKey: "evidence-api-job",
+		ProjectKey: store.ProjectKey(),
+	})
 	require.NoError(t, err)
 	record, err := store.InsertCandidate(context.Background(), memorystore.Candidate{
 		SessionID:        "evidence-session",

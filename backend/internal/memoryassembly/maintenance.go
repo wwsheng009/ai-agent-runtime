@@ -49,7 +49,7 @@ func MaintenanceEnabled(opts MaintenanceOptions) bool {
 	return cfg.idleEnabled || cfg.consolidationEnabled || cfg.retentionEnabled ||
 		cfg.lifecycleEnabled || cfg.turnDigestEnabled || cfg.captureEnabled ||
 		cfg.startupRecovery || cfg.freshnessEnabled || cfg.periodicCaptureExtraction ||
-		cfg.jobDeadlineRepairEnabled || cfg.coreRebuildEnabled
+		cfg.jobDeadlineRepairEnabled || cfg.coreRebuildEnabled || cfg.dreamingEnabled
 }
 
 // StartMaintenance starts the shared ticker loop and returns a stop function
@@ -95,6 +95,12 @@ type maintenanceSchedule struct {
 	captureExtractionBatchSize int
 	coreRebuildEnabled         bool
 	coreRebuildInterval        time.Duration
+	dreamingEnabled            bool
+	dreamingInterval           time.Duration
+	dreamingLimit              int
+	dreamingMaxTokens          int
+	dreamingShadow             bool
+	dreamingRetentionDays      int
 	jobDeadlineRepairEnabled   bool
 	jobDeadlineRepairInterval  time.Duration
 	jobDeadlineRepairBatchSize int
@@ -140,6 +146,31 @@ func deriveMaintenanceSchedule(opts MaintenanceOptions) maintenanceSchedule {
 	result.coreRebuildInterval = coreRebuild.Interval
 	if result.coreRebuildInterval <= 0 {
 		result.coreRebuildInterval = 24 * time.Hour
+	}
+	dreaming := cfg.Memory.Dreaming
+	result.dreamingEnabled = dreaming.Enabled
+	result.dreamingInterval = dreaming.Interval
+	if result.dreamingInterval <= 0 {
+		result.dreamingInterval = 24 * time.Hour
+	}
+	result.dreamingLimit = dreaming.Limit
+	if result.dreamingLimit <= 0 {
+		result.dreamingLimit = 20
+	}
+	if result.dreamingLimit > 100 {
+		result.dreamingLimit = 100
+	}
+	result.dreamingMaxTokens = dreaming.MaxTokens
+	if result.dreamingMaxTokens <= 0 {
+		result.dreamingMaxTokens = 800
+	}
+	if result.dreamingMaxTokens > 4000 {
+		result.dreamingMaxTokens = 4000
+	}
+	result.dreamingShadow = dreaming.Shadow
+	result.dreamingRetentionDays = dreaming.RetentionDays
+	if result.dreamingRetentionDays <= 0 {
+		result.dreamingRetentionDays = 30
 	}
 	result.captureExtractionBatchSize = captureExtraction.BatchSize
 	deadlineRepair := cfg.Memory.Maintenance.JobDeadlineRepair
@@ -389,6 +420,13 @@ func runMaintenanceOwned(ctx context.Context, opts MaintenanceOptions) {
 		coreRebuildTick = coreRebuildTicker.C
 		defer coreRebuildTicker.Stop()
 	}
+	var dreamingTicker *time.Ticker
+	var dreamingTick <-chan time.Time
+	if cfg.dreamingEnabled {
+		dreamingTicker = time.NewTicker(cfg.dreamingInterval)
+		dreamingTick = dreamingTicker.C
+		defer dreamingTicker.Stop()
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -407,6 +445,15 @@ func runMaintenanceOwned(ctx context.Context, opts MaintenanceOptions) {
 			if !runStage("core_rebuild", func(stageCtx context.Context) error {
 				_, err := memoryruntime.NewCoreRebuilder(rt.Store, rt.Config).Run(stageCtx)
 				return err
+			}) {
+				return
+			}
+		case <-dreamingTick:
+			if !runStage("dreaming", func(stageCtx context.Context) error {
+				return RunDreamingStage(
+					stageCtx, rt.Store, cfg.dreamingLimit, cfg.dreamingMaxTokens,
+					cfg.dreamingShadow, cfg.dreamingRetentionDays, rt.DreamAnalyzer,
+				)
 			}) {
 				return
 			}

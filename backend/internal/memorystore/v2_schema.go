@@ -9,8 +9,8 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/migrate"
 )
 
-func initMemorySchema(ctx context.Context, db *sql.DB) error {
-	migrations := []migrate.Migration{
+func memoryMigrations() []migrate.Migration {
+	return []migrate.Migration{
 		{
 			Version: 1,
 			Name:    "memory_v2_core",
@@ -1142,8 +1142,363 @@ CREATE INDEX idx_memory_entries_scope_source_kind
   ON memory_entries(tenant_id, project_key, scope_kind, scope_key, status, LOWER(source_kind), updated_at DESC, id DESC);
 `,
 		},
+		{
+			Version: 26,
+			Name:    "memory_v26_episodes_patches_dreams",
+			UpSQL: `
+CREATE TABLE memory_episodes (
+    id                    TEXT PRIMARY KEY,
+    memory_id             TEXT NOT NULL,
+    tenant_id             TEXT NOT NULL DEFAULT '',
+    project_key           TEXT NOT NULL DEFAULT '',
+    task_id               TEXT NOT NULL DEFAULT '',
+    session_id            TEXT NOT NULL DEFAULT '',
+    problem               TEXT NOT NULL,
+    actions_json          TEXT NOT NULL DEFAULT '[]',
+    result                TEXT NOT NULL DEFAULT '',
+    failure_reason        TEXT NOT NULL DEFAULT '',
+    outcome               TEXT NOT NULL,
+    started_at            TEXT,
+    ended_at              TEXT,
+    source_event_ids_json TEXT NOT NULL DEFAULT '[]',
+    created_at            TEXT NOT NULL,
+    UNIQUE(memory_id)
+);
+CREATE INDEX idx_memory_episodes_scope
+  ON memory_episodes(tenant_id, project_key, session_id, task_id, outcome, created_at DESC);
+CREATE INDEX idx_memory_episodes_memory
+  ON memory_episodes(memory_id);
+
+CREATE TABLE memory_patches (
+    id                       TEXT PRIMARY KEY,
+    tenant_id                TEXT NOT NULL DEFAULT '',
+    project_key              TEXT NOT NULL DEFAULT '',
+    scope_kind               TEXT NOT NULL DEFAULT 'project',
+    scope_key                TEXT NOT NULL DEFAULT '',
+    operation                TEXT NOT NULL,
+    target_ids_json          TEXT NOT NULL DEFAULT '[]',
+    proposed_content         TEXT NOT NULL DEFAULT '',
+    proposed_metadata_json   TEXT NOT NULL DEFAULT '{}',
+    reason                   TEXT NOT NULL DEFAULT '',
+    evidence_json            TEXT NOT NULL DEFAULT '[]',
+    risk_level               TEXT NOT NULL,
+    status                   TEXT NOT NULL DEFAULT 'proposed',
+    expected_revisions_json  TEXT NOT NULL DEFAULT '{}',
+    applied_record_ids_json  TEXT NOT NULL DEFAULT '[]',
+    applied_revisions_json   TEXT NOT NULL DEFAULT '{}',
+    rollback_versions_json   TEXT NOT NULL DEFAULT '{}',
+    created_by               TEXT NOT NULL DEFAULT '',
+    reviewed_by              TEXT NOT NULL DEFAULT '',
+    review_note              TEXT NOT NULL DEFAULT '',
+    error                    TEXT NOT NULL DEFAULT '',
+    created_at               TEXT NOT NULL,
+    reviewed_at              TEXT,
+    applied_at               TEXT,
+    rolled_back_at           TEXT
+);
+CREATE INDEX idx_memory_patches_scope_status
+  ON memory_patches(tenant_id, project_key, status, risk_level, created_at DESC);
+CREATE INDEX idx_memory_patches_target
+  ON memory_patches(tenant_id, project_key, scope_kind, scope_key, created_at DESC);
+
+CREATE TABLE memory_dream_runs (
+    id           TEXT PRIMARY KEY,
+    tenant_id    TEXT NOT NULL DEFAULT '',
+    project_key  TEXT NOT NULL DEFAULT '',
+    status       TEXT NOT NULL,
+    window_start TEXT,
+    window_end   TEXT,
+    input_count  INTEGER NOT NULL DEFAULT 0,
+    patch_count  INTEGER NOT NULL DEFAULT 0,
+    token_cost   INTEGER NOT NULL DEFAULT 0,
+    error        TEXT NOT NULL DEFAULT '',
+    started_at   TEXT,
+    finished_at  TEXT,
+    created_at   TEXT NOT NULL
+);
+CREATE INDEX idx_memory_dream_runs_scope
+  ON memory_dream_runs(tenant_id, project_key, status, created_at DESC);
+`,
+		},
+		{
+			Version: 27,
+			Name:    "memory_v27_trust_feedback_entities",
+			UpSQL: `
+ALTER TABLE memory_entries ADD COLUMN trust_level TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_entries ADD COLUMN trust_reason TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_entries ADD COLUMN trusted_at TEXT;
+ALTER TABLE memory_entries ADD COLUMN feedback_score REAL NOT NULL DEFAULT 0;
+
+UPDATE memory_entries
+SET trust_level = CASE
+  WHEN LOWER(source_kind) = 'manual' THEN 'user_explicit'
+  WHEN LOWER(source_kind) IN ('tool', 'web', 'repo', 'external') THEN 'untrusted_external'
+  ELSE 'agent_inference'
+END
+WHERE trust_level = '';
+UPDATE memory_entries
+SET trust_reason = 'backfill:' || COALESCE(source_kind, '')
+WHERE trust_reason = '';
+UPDATE memory_entries
+SET trust_level = 'untrusted_external',
+    trust_reason = 'backfill:external_source'
+WHERE trust_level != 'system_policy'
+  AND EXISTS (
+    SELECT 1 FROM memory_sources src
+    WHERE src.memory_id = memory_entries.id
+      AND LOWER(src.source_type) IN ('tool', 'web', 'repo')
+  );
+
+CREATE INDEX idx_memory_entries_trust
+  ON memory_entries(tenant_id, project_key, trust_level, status, updated_at DESC);
+CREATE INDEX idx_memory_entries_feedback_score
+  ON memory_entries(tenant_id, project_key, feedback_score DESC, updated_at DESC);
+
+CREATE TABLE memory_entities (
+    id             TEXT PRIMARY KEY,
+    tenant_id      TEXT NOT NULL DEFAULT '',
+    project_key    TEXT NOT NULL DEFAULT '',
+    scope_kind     TEXT NOT NULL DEFAULT 'project',
+    scope_key      TEXT NOT NULL DEFAULT '',
+    canonical_name TEXT NOT NULL,
+    entity_type    TEXT NOT NULL,
+    aliases_json   TEXT NOT NULL DEFAULT '[]',
+    metadata_json  TEXT NOT NULL DEFAULT '{}',
+    created_at     TEXT NOT NULL,
+    updated_at     TEXT NOT NULL,
+    UNIQUE(tenant_id, project_key, scope_kind, scope_key, entity_type, canonical_name)
+);
+CREATE INDEX idx_memory_entities_lookup
+  ON memory_entities(tenant_id, project_key, scope_kind, scope_key, entity_type, canonical_name);
+CREATE INDEX idx_memory_entities_updated
+  ON memory_entities(tenant_id, project_key, updated_at DESC);
+
+CREATE TABLE memory_entity_links (
+    id          TEXT PRIMARY KEY,
+    memory_id   TEXT NOT NULL,
+    entity_id   TEXT NOT NULL,
+    relation    TEXT NOT NULL,
+    confidence  REAL NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL,
+    UNIQUE(memory_id, entity_id, relation)
+);
+CREATE INDEX idx_memory_entity_links_memory
+  ON memory_entity_links(memory_id, relation);
+CREATE INDEX idx_memory_entity_links_entity
+  ON memory_entity_links(entity_id, relation);
+
+CREATE TABLE memory_feedback (
+    id          TEXT PRIMARY KEY,
+    memory_id   TEXT NOT NULL,
+    tenant_id   TEXT NOT NULL DEFAULT '',
+    project_key TEXT NOT NULL DEFAULT '',
+    session_id  TEXT NOT NULL DEFAULT '',
+    turn_id     TEXT NOT NULL DEFAULT '',
+    kind        TEXT NOT NULL,
+    comment     TEXT NOT NULL DEFAULT '',
+    actor       TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX idx_memory_feedback_memory
+  ON memory_feedback(tenant_id, project_key, memory_id, created_at DESC);
+CREATE INDEX idx_memory_feedback_scope
+  ON memory_feedback(tenant_id, project_key, session_id, created_at DESC);
+`,
+		},
+		{
+			Version: 28,
+			Name:    "memory_v28_summary_tenant_identity",
+			UpSQL: `
+DROP INDEX IF EXISTS idx_memory_summaries_active;
+CREATE UNIQUE INDEX idx_memory_summaries_active
+  ON memory_summaries(tenant_id, project_key, scope_kind, scope_key, summary_kind)
+  WHERE status = 'active';
+CREATE INDEX idx_memory_summaries_tenant_project
+  ON memory_summaries(tenant_id, project_key, status, revision DESC);
+`,
+		},
+		{
+			Version: 29,
+			Name:    "memory_v29_turn_digest_window_tenant_identity",
+			UpSQL: `
+DROP INDEX IF EXISTS idx_memory_turn_digests_legacy_turn;
+CREATE UNIQUE INDEX idx_memory_turn_digests_legacy_turn
+  ON memory_turn_digests(tenant_id, project_key, session_id, session_generation, turn_id)
+  WHERE capture_receipt_id = '';
+
+DROP INDEX IF EXISTS idx_memory_turn_digests_capture_receipt;
+CREATE UNIQUE INDEX idx_memory_turn_digests_capture_receipt
+  ON memory_turn_digests(tenant_id, project_key, capture_receipt_id)
+  WHERE capture_receipt_id <> '';
+
+DROP INDEX IF EXISTS idx_memory_turn_windows_session;
+DROP INDEX IF EXISTS idx_memory_turn_windows_status;
+ALTER TABLE memory_turn_windows RENAME TO memory_turn_windows_v28;
+CREATE TABLE memory_turn_windows (
+    window_seq          INTEGER PRIMARY KEY AUTOINCREMENT,
+    id                  TEXT NOT NULL UNIQUE,
+    scope               TEXT NOT NULL DEFAULT 'project',
+    tenant_id           TEXT NOT NULL DEFAULT '',
+    project_key         TEXT NOT NULL,
+    scope_kind          TEXT NOT NULL DEFAULT 'project',
+    scope_key           TEXT NOT NULL DEFAULT '',
+    session_id          TEXT NOT NULL,
+    session_generation  INTEGER NOT NULL DEFAULT 0,
+    window_index        INTEGER NOT NULL DEFAULT 0,
+    start_digest_seq    INTEGER NOT NULL,
+    end_digest_seq      INTEGER NOT NULL,
+    start_message_seq   INTEGER NOT NULL DEFAULT 0,
+    end_message_seq     INTEGER NOT NULL DEFAULT 0,
+    turn_count          INTEGER NOT NULL DEFAULT 0,
+    summary_text        TEXT NOT NULL DEFAULT '',
+    summary_hash        TEXT NOT NULL DEFAULT '',
+    summary_revision    INTEGER NOT NULL DEFAULT 0,
+    source_hash         TEXT NOT NULL DEFAULT '',
+    source_revision     INTEGER NOT NULL DEFAULT 0,
+    status              TEXT NOT NULL DEFAULT 'pending',
+    model               TEXT,
+    usage_json          TEXT NOT NULL DEFAULT '{}',
+    metadata_json       TEXT NOT NULL DEFAULT '{}',
+    last_error          TEXT,
+    created_at          TEXT NOT NULL,
+    updated_at          TEXT NOT NULL,
+    processed_at        TEXT,
+    UNIQUE(tenant_id, project_key, session_id, session_generation, start_digest_seq, end_digest_seq)
+);
+INSERT INTO memory_turn_windows (
+    window_seq, id, scope, tenant_id, project_key, scope_kind, scope_key,
+    session_id, session_generation, window_index, start_digest_seq, end_digest_seq,
+    start_message_seq, end_message_seq, turn_count, summary_text, summary_hash,
+    summary_revision, source_hash, source_revision, status, model, usage_json,
+    metadata_json, last_error, created_at, updated_at, processed_at
+)
+SELECT window_seq, id, scope, '', project_key, 'project', project_key,
+       session_id, session_generation, window_index, start_digest_seq, end_digest_seq,
+       start_message_seq, end_message_seq, turn_count, summary_text, summary_hash,
+       summary_revision, source_hash, source_revision, status, model, usage_json,
+       metadata_json, last_error, created_at, updated_at, processed_at
+FROM memory_turn_windows_v28;
+DROP TABLE memory_turn_windows_v28;
+
+CREATE INDEX idx_memory_turn_windows_session
+  ON memory_turn_windows(tenant_id, project_key, session_id, session_generation, window_seq);
+CREATE INDEX idx_memory_turn_windows_status
+  ON memory_turn_windows(tenant_id, project_key, status, window_seq);
+CREATE INDEX idx_memory_turn_windows_tenant_scope
+  ON memory_turn_windows(tenant_id, scope_kind, scope_key, status, window_seq);
+`,
+		},
+		{
+			Version: 30,
+			Name:    "memory_v30_purge_tenant_identity",
+			UpSQL: `
+ALTER TABLE memory_session_purges RENAME TO memory_session_purges_v29;
+CREATE TABLE memory_session_purges (
+    tenant_id                 TEXT NOT NULL DEFAULT '',
+    project_key               TEXT NOT NULL,
+    session_id                TEXT NOT NULL,
+    generation                INTEGER NOT NULL,
+    fenced_session_generation INTEGER NOT NULL DEFAULT 0,
+    purge_generation          INTEGER NOT NULL DEFAULT 0,
+    state                     TEXT NOT NULL DEFAULT 'purged',
+    reason                    TEXT NOT NULL DEFAULT '',
+    created_at                TEXT NOT NULL,
+    updated_at                TEXT NOT NULL,
+    PRIMARY KEY(tenant_id, project_key, session_id)
+);
+INSERT INTO memory_session_purges (
+    tenant_id, project_key, session_id, generation,
+    fenced_session_generation, purge_generation, state, reason, created_at, updated_at
+)
+SELECT '', project_key, session_id, generation,
+       fenced_session_generation, purge_generation, state, reason, created_at, updated_at
+FROM memory_session_purges_v29;
+DROP TABLE memory_session_purges_v29;
+DROP INDEX IF EXISTS idx_memory_session_purges_generation;
+CREATE INDEX idx_memory_session_purges_generation
+  ON memory_session_purges(tenant_id, project_key, generation);
+
+ALTER TABLE memory_turn_capture_generations RENAME TO memory_turn_capture_generations_v29;
+CREATE TABLE memory_turn_capture_generations (
+    tenant_id          TEXT NOT NULL DEFAULT '',
+    project_key        TEXT NOT NULL,
+    capture_receipt_id TEXT NOT NULL,
+    session_id         TEXT NOT NULL,
+    turn_id            TEXT NOT NULL,
+    generation         INTEGER NOT NULL DEFAULT 0,
+    created_at         TEXT NOT NULL,
+    PRIMARY KEY(tenant_id, project_key, capture_receipt_id)
+);
+INSERT INTO memory_turn_capture_generations (
+    tenant_id, project_key, capture_receipt_id, session_id, turn_id, generation, created_at
+)
+SELECT '', project_key, capture_receipt_id, session_id, turn_id, generation, created_at
+FROM memory_turn_capture_generations_v29;
+DROP TABLE memory_turn_capture_generations_v29;
+DROP INDEX IF EXISTS idx_memory_turn_capture_generations_session;
+CREATE INDEX idx_memory_turn_capture_generations_session
+  ON memory_turn_capture_generations(tenant_id, project_key, session_id, generation);
+`,
+		},
+		{
+			Version: 31,
+			Name:    "memory_v31_dream_reflection_preview",
+			UpSQL: `
+ALTER TABLE memory_dream_runs ADD COLUMN reflection_text TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_dream_runs ADD COLUMN model TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_dream_runs ADD COLUMN shadow INTEGER NOT NULL DEFAULT 0;
+`,
+		},
+		{
+			Version: 32,
+			Name:    "memory_v32_dream_source_registry",
+			UpSQL: `
+CREATE TABLE memory_dream_sources (
+    tenant_id    TEXT NOT NULL DEFAULT '',
+    project_key  TEXT NOT NULL,
+    source_hash  TEXT NOT NULL,
+    dream_run_id TEXT NOT NULL,
+    patch_id     TEXT NOT NULL,
+    created_at   TEXT NOT NULL,
+    PRIMARY KEY(tenant_id, project_key, source_hash, dream_run_id)
+);
+CREATE INDEX idx_memory_dream_sources_lookup
+  ON memory_dream_sources(tenant_id, project_key, source_hash, created_at DESC);
+CREATE INDEX idx_memory_dream_sources_patch
+  ON memory_dream_sources(tenant_id, project_key, patch_id);
+`,
+		},
+		{
+			Version: 33,
+			Name:    "memory_v33_backfill_dream_source_registry",
+			UpSQL: `
+INSERT OR IGNORE INTO memory_dream_runs (
+    id, tenant_id, project_key, status, window_start, window_end,
+    input_count, patch_count, token_cost, reflection_text, model, shadow,
+    error, started_at, finished_at, created_at
+)
+SELECT 'dream_legacy_' || p.id, p.tenant_id, p.project_key, 'succeeded',
+       NULL, NULL, 0, 1, 0, p.proposed_content,
+       COALESCE(json_extract(p.proposed_metadata_json, '$.dream_model'), 'legacy'),
+       0, 'migrated legacy Dreaming patch', p.created_at, p.created_at, p.created_at
+FROM memory_patches p
+WHERE COALESCE(json_extract(p.proposed_metadata_json, '$.dreaming_source_hash'), '') <> '';
+
+INSERT OR IGNORE INTO memory_dream_sources (
+    tenant_id, project_key, source_hash, dream_run_id, patch_id, created_at
+)
+SELECT p.tenant_id, p.project_key,
+       json_extract(p.proposed_metadata_json, '$.dreaming_source_hash'),
+       'dream_legacy_' || p.id, p.id, p.created_at
+FROM memory_patches p
+WHERE COALESCE(json_extract(p.proposed_metadata_json, '$.dreaming_source_hash'), '') <> '';
+`,
+		},
 	}
-	if err := migrate.Apply(ctx, db, migrations); err != nil {
+}
+
+func initMemorySchema(ctx context.Context, db *sql.DB) error {
+	if err := migrate.Apply(ctx, db, memoryMigrations()); err != nil {
 		return fmt.Errorf("memory v2 schema: %w", err)
 	}
 	if err := backfillMemoryScopeColumns(ctx, db); err != nil {

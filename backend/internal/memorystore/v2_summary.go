@@ -68,11 +68,18 @@ FROM memory_entries WHERE id = ?
 	if summary.ProjectKey == "" {
 		summary.ProjectKey = s.cfg.ProjectKey
 	}
+	summaryScopeKind := ScopeProject
+	summaryScopeKey := summary.ProjectKey
+	tenantID := s.tenantID()
 	if summary.SummaryKind == "" {
 		summary.SummaryKind = "long_term"
 	}
 	if summary.Revision <= 0 {
 		var revision int64
+		// Revision allocation stays project-wide because the v1 schema still has
+		// UNIQUE(scope, project_key, summary_kind, revision). Reads and writes
+		// below remain tenant-scoped; a shared revision counter is not a data
+		// visibility boundary.
 		if err := db.QueryRowContext(ctx, `
 SELECT COALESCE(MAX(revision), 0) + 1 FROM memory_summaries
 WHERE scope = ? AND project_key = ? AND summary_kind = ?
@@ -114,21 +121,23 @@ WHERE scope = ? AND project_key = ? AND summary_kind = ?
 	}
 	if _, err := tx.ExecContext(ctx, `
 UPDATE memory_summaries SET status = 'superseded'
-WHERE scope = ? AND project_key = ? AND summary_kind = ? AND status = 'active'
-`, string(summary.Scope), summary.ProjectKey, summary.SummaryKind); err != nil {
+WHERE tenant_id = ? AND project_key = ? AND scope_kind = ? AND scope_key = ? AND summary_kind = ? AND status = 'active'
+`, tenantID, summary.ProjectKey, string(summaryScopeKind), summaryScopeKey, summary.SummaryKind); err != nil {
 		return Summary{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO memory_summaries (
     id, scope, project_key, summary_kind, revision, status, freshness_status,
     summary, summary_tokens, source_count, input_watermark, generated_at,
-    model, content_hash, record_ids_json, metadata_json
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    model, content_hash, record_ids_json, metadata_json,
+    tenant_id, scope_kind, scope_key
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `, summary.ID, string(summary.Scope), summary.ProjectKey, summary.SummaryKind,
 		summary.Revision, summary.Status, string(summary.Freshness), summary.Text,
 		summary.TokenEstimate, summary.SourceCount, summary.InputWatermark,
 		summary.GeneratedAt.UTC().Format(time.RFC3339Nano), summary.Model,
-		summary.ContentHash, string(recordIDs), string(metadata)); err != nil {
+		summary.ContentHash, string(recordIDs), string(metadata),
+		tenantID, string(summaryScopeKind), summaryScopeKey); err != nil {
 		return Summary{}, err
 	}
 	for rank, id := range itemIDs {
@@ -205,8 +214,9 @@ func (s *Store) writeSummaryArtifactsIfCurrent(ctx context.Context, summary Summ
 	var current int
 	if err := tx.QueryRowContext(ctx, `
 SELECT COUNT(1) FROM memory_summaries
-WHERE id = ? AND project_key = ? AND status = 'active' AND freshness_status = 'fresh'
-`, summary.ID, summary.ProjectKey).Scan(&current); err != nil {
+WHERE id = ? AND tenant_id = ? AND project_key = ? AND scope_kind = 'project' AND scope_key = ?
+  AND status = 'active' AND freshness_status = 'fresh'
+`, summary.ID, s.tenantID(), summary.ProjectKey, summary.ProjectKey).Scan(&current); err != nil {
 		return err
 	}
 	if current == 0 {
@@ -239,8 +249,9 @@ func (s *Store) clearSummaryArtifactsIfNoFreshActiveSummary(ctx context.Context,
 	var current int
 	if err := tx.QueryRowContext(ctx, `
 SELECT COUNT(1) FROM memory_summaries
-WHERE project_key = ? AND status = 'active' AND freshness_status = 'fresh'
-`, projectKey).Scan(&current); err != nil {
+WHERE tenant_id = ? AND project_key = ? AND scope_kind = 'project' AND scope_key = ?
+  AND status = 'active' AND freshness_status = 'fresh'
+`, s.tenantID(), projectKey, projectKey).Scan(&current); err != nil {
 		return err
 	}
 	if current == 0 {
@@ -264,9 +275,9 @@ SELECT id, scope, project_key, summary_kind, revision, status, freshness_status,
        summary, summary_tokens, source_count, input_watermark, generated_at,
        COALESCE(model, ''), content_hash, record_ids_json, metadata_json
 FROM memory_summaries
-WHERE project_key = ?
+WHERE tenant_id = ? AND project_key = ? AND scope_kind = 'project' AND scope_key = ?
 ORDER BY revision DESC LIMIT ?
-`, s.cfg.ProjectKey, limit)
+`, s.tenantID(), s.cfg.ProjectKey, s.cfg.ProjectKey, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -335,9 +346,10 @@ SELECT id, scope, project_key, summary_kind, revision, status, freshness_status,
        summary, summary_tokens, source_count, input_watermark, generated_at,
        model, content_hash, record_ids_json, metadata_json
 FROM memory_summaries
-WHERE project_key = ? AND summary_kind = 'long_term' AND status = 'active'
+WHERE tenant_id = ? AND project_key = ? AND scope_kind = 'project' AND scope_key = ?
+  AND summary_kind = 'long_term' AND status = 'active'
 ORDER BY revision DESC LIMIT 1
-`, s.cfg.ProjectKey).Scan(
+`, s.tenantID(), s.cfg.ProjectKey, s.cfg.ProjectKey).Scan(
 		&summaryID, &scope, &projectKey, &kind, &revision, &status, &freshness,
 		&text, &tokens, &sourceCount, &watermark, &generatedAt, &model,
 		&contentHash, &recordIDsJSON, &metadataJSON,
@@ -380,8 +392,9 @@ func (s *Store) RetireActiveSummary(ctx context.Context) (bool, error) {
 	}
 	res, err := tx.ExecContext(ctx, `
 UPDATE memory_summaries SET status = 'superseded', freshness_status = 'stale'
-WHERE project_key = ? AND summary_kind = 'long_term' AND status = 'active'
-`, s.cfg.ProjectKey)
+WHERE tenant_id = ? AND project_key = ? AND scope_kind = 'project' AND scope_key = ?
+  AND summary_kind = 'long_term' AND status = 'active'
+`, s.tenantID(), s.cfg.ProjectKey, s.cfg.ProjectKey)
 	if err != nil {
 		return false, err
 	}
@@ -407,9 +420,10 @@ func (s *Store) EnqueueStaleSummaryRebuilds(ctx context.Context) (int, error) {
 	rows, err := db.QueryContext(ctx, `
 SELECT id, scope, project_key, input_watermark
 FROM memory_summaries
-WHERE project_key = ? AND status = 'active' AND freshness_status = 'stale'
+WHERE tenant_id = ? AND project_key = ? AND scope_kind = 'project' AND scope_key = ?
+  AND status = 'active' AND freshness_status = 'stale'
 ORDER BY revision DESC
-`, s.cfg.ProjectKey)
+`, s.tenantID(), s.cfg.ProjectKey, s.cfg.ProjectKey)
 	if err != nil {
 		return 0, err
 	}
@@ -439,7 +453,7 @@ ORDER BY revision DESC
 	}
 	inserted := 0
 	for _, summary := range summaries {
-		affected, err := enqueueSummaryRebuild(ctx, tx, summary.id+":"+summary.watermark,
+		affected, err := enqueueSummaryRebuild(ctx, tx, s.tenantID(), summary.id+":"+summary.watermark,
 			summary.scope, summary.projectKey, summary.watermark)
 		if err != nil {
 			return inserted, err

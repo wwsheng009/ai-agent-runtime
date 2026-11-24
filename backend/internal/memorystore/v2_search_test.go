@@ -67,6 +67,45 @@ func TestSearchRecordsShortQueryFallsBackToLike(t *testing.T) {
 	require.Equal(t, "like_fallback", result.Items[0].MatchSource)
 }
 
+func TestSearchRecordsAppliesMultiValueFiltersOnFTS(t *testing.T) {
+	store, err := New(Config{Root: t.TempDir(), Mode: "on"})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	_, err = store.Append(AppendNoteOptions{
+		Text: "filtered manual decision alpha beta", Kind: "decision",
+		Tags: []string{"alpha", "beta"},
+	})
+	require.NoError(t, err)
+	fact, err := store.InsertCandidate(context.Background(), Candidate{
+		SessionID: "filter-session", Kind: "fact", Text: "filtered automatic fact alpha beta",
+		Tags: []string{"alpha", "beta"}, Confidence: 0.9,
+		SourceHash: "filter-fact", SourceRevision: 1,
+	})
+	require.NoError(t, err)
+	active := StatusActive
+	fact, err = store.UpdateRecord(context.Background(), fact.ID, RecordPatch{Status: &active})
+	require.NoError(t, err)
+	decision, err := store.InsertCandidate(context.Background(), Candidate{
+		SessionID: "filter-session", Kind: "decision", Text: "filtered automatic decision alpha",
+		Tags: []string{"alpha"}, Confidence: 0.9,
+		SourceHash: "filter-decision", SourceRevision: 1,
+	})
+	require.NoError(t, err)
+	decision, err = store.UpdateRecord(context.Background(), decision.ID, RecordPatch{Status: &active})
+	require.NoError(t, err)
+
+	requireMemoryFTS(t, store)
+	result, err := store.SearchRecords(context.Background(), RecordSearchQuery{
+		Text: "filtered", Status: StatusActive, Kinds: []string{"fact"},
+		Tags: []string{"beta"}, Limit: 10,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "fts5", result.Backend)
+	require.Equal(t, []string{fact.ID}, recordIDsFromSearch(result))
+	require.NotContains(t, recordIDsFromSearch(result), decision.ID)
+}
+
 func TestSearchRecordsSupportsLegacyJSONLMode(t *testing.T) {
 	store, err := New(Config{Root: t.TempDir(), Mode: "off"})
 	require.NoError(t, err)

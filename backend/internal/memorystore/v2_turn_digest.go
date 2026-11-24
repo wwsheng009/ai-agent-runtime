@@ -164,27 +164,28 @@ func (s *Store) RecordTurnDigest(ctx context.Context, digest TurnDigest) (TurnDi
 		return TurnDigest{}, err
 	}
 	if digest.SessionGeneration > 0 {
-		if err := checkSessionPurgeGenerationTx(ctx, tx, digest.ProjectKey,
+		if err := checkSessionPurgeGenerationTx(ctx, tx, s.tenantID(), digest.ProjectKey,
 			digest.SessionID, digest.SessionGeneration); err != nil {
 			return TurnDigest{}, err
 		}
 	} else if err := checkLegacySessionPurgeFenceTx(ctx, tx,
-		digest.ProjectKey, digest.SessionID); err != nil {
+		s.tenantID(), digest.ProjectKey, digest.SessionID); err != nil {
 		// Legacy outbox writers do not carry enough information to distinguish
 		// a deleted incarnation from a recreated session with the same ID.
 		return TurnDigest{}, err
 	}
 	_, err = tx.ExecContext(ctx, `
 INSERT INTO memory_turn_digests (
-    id, scope, project_key, session_id, session_generation, turn_id, trace_id,
+    id, scope, project_key, tenant_id, scope_kind, scope_key,
+    session_id, session_generation, turn_id, trace_id,
     parent_session_id, agent_type, user_message_id, assistant_message_id,
     message_seq_start, message_seq_end, capture_receipt_id, source_revision, range_hash, enqueued_at,
     user_text, assistant_text, text_truncated, outcome, steps,
     usage_json, metadata_json, digest_hash, digest_revision, status,
     process_job_id, last_error, rollup_status, rollup_window_id, rolled_up_at,
     created_at, updated_at, processed_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
-ON CONFLICT(project_key, session_id, session_generation, turn_id) WHERE capture_receipt_id = '' DO UPDATE SET
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(tenant_id, project_key, session_id, session_generation, turn_id) WHERE capture_receipt_id = '' DO UPDATE SET
     trace_id = excluded.trace_id,
     parent_session_id = excluded.parent_session_id,
     agent_type = excluded.agent_type,
@@ -248,7 +249,9 @@ ON CONFLICT(project_key, session_id, session_generation, turn_id) WHERE capture_
         ELSE NULL
     END,
     updated_at = excluded.updated_at
-`, digest.ID, string(digest.Scope), digest.ProjectKey, digest.SessionID, digest.SessionGeneration, digest.TurnID,
+`, digest.ID, string(digest.Scope), digest.ProjectKey, s.tenantID(),
+		string(ScopeProject), digest.ProjectKey,
+		digest.SessionID, digest.SessionGeneration, digest.TurnID,
 		nullableString(digest.TraceID), nullableString(digest.ParentSessionID),
 		nullableString(digest.AgentType), nullableString(digest.UserMessageID),
 		nullableString(digest.AssistantMessageID), digest.MessageSeqStart, digest.MessageSeqEnd,
@@ -259,7 +262,8 @@ ON CONFLICT(project_key, session_id, session_generation, turn_id) WHERE capture_
 		nullableString(digest.ProcessJobID), nullableString(digest.LastError),
 		string(digest.RollupStatus), nullableString(digest.RollupWindowID),
 		nullableTime(digest.RolledUpAt),
-		digest.CreatedAt.UTC().Format(time.RFC3339Nano), digest.UpdatedAt.UTC().Format(time.RFC3339Nano))
+		digest.CreatedAt.UTC().Format(time.RFC3339Nano), digest.UpdatedAt.UTC().Format(time.RFC3339Nano),
+		nullableTime(digest.ProcessedAt))
 	if err != nil {
 		return TurnDigest{}, fmt.Errorf("memorystore: record turn digest: %w", err)
 	}
@@ -307,9 +311,9 @@ func (s *Store) getTurnDigestByTurnGeneration(ctx context.Context, projectKey, s
        rollup_status, COALESCE(rollup_window_id, ''),
        COALESCE(rolled_up_at, ''), created_at, updated_at, COALESCE(processed_at, '')
  FROM memory_turn_digests
- WHERE project_key = ? AND session_id = ? AND turn_id = ?
+ WHERE tenant_id = ? AND project_key = ? AND session_id = ? AND turn_id = ?
 `
-	args := []interface{}{projectKey, sessionID, turnID}
+	args := []interface{}{s.tenantID(), projectKey, sessionID, turnID}
 	if generation != nil {
 		query += ` AND session_generation = ?`
 		args = append(args, *generation)
@@ -338,8 +342,8 @@ func (s *Store) GetTurnDigestByCaptureReceipt(ctx context.Context, receiptID str
        rollup_status, COALESCE(rollup_window_id, ''),
        COALESCE(rolled_up_at, ''), created_at, updated_at, COALESCE(processed_at, '')
 FROM memory_turn_digests
-WHERE project_key = ? AND capture_receipt_id = ?
-`, s.cfg.ProjectKey, strings.TrimSpace(receiptID))
+WHERE tenant_id = ? AND project_key = ? AND capture_receipt_id = ?
+`, s.tenantID(), s.cfg.ProjectKey, strings.TrimSpace(receiptID))
 	return scanTurnDigest(row)
 }
 
@@ -361,8 +365,8 @@ SELECT digest_seq, id, scope, project_key, session_id, session_generation, turn_
        rollup_status, COALESCE(rollup_window_id, ''),
        COALESCE(rolled_up_at, ''), created_at, updated_at, COALESCE(processed_at, '')
 FROM memory_turn_digests
-WHERE project_key = ? AND id = ?
-`, s.cfg.ProjectKey, strings.TrimSpace(digestID))
+WHERE tenant_id = ? AND project_key = ? AND id = ?
+`, s.tenantID(), s.cfg.ProjectKey, strings.TrimSpace(digestID))
 	return scanTurnDigest(row)
 }
 
@@ -395,12 +399,12 @@ func (s *Store) ListPendingTurnDigestSessions(ctx context.Context, projectKey st
 	rows, err := db.QueryContext(ctx, `
 SELECT project_key, session_id, COUNT(1), MIN(digest_seq), MAX(digest_seq)
 FROM memory_turn_digests
-WHERE project_key = ? AND status = 'pending'
+WHERE tenant_id = ? AND project_key = ? AND status = 'pending'
   AND capture_receipt_id = ''
 GROUP BY project_key, session_id
 ORDER BY MIN(digest_seq) ASC
 LIMIT ?
-`, strings.TrimSpace(projectKey), limit)
+`, s.tenantID(), strings.TrimSpace(projectKey), limit)
 	if err != nil {
 		return nil, fmt.Errorf("memorystore: list pending turn digest sessions: %w", err)
 	}
@@ -447,10 +451,10 @@ func (s *Store) listPendingTurnDigests(ctx context.Context, sessionID string, ge
        rollup_status, COALESCE(rollup_window_id, ''),
        COALESCE(rolled_up_at, ''), created_at, updated_at, COALESCE(processed_at, '')
 	FROM memory_turn_digests
-	WHERE project_key = ? AND session_id = ? AND status = 'pending'
+	WHERE tenant_id = ? AND project_key = ? AND session_id = ? AND status = 'pending'
    AND capture_receipt_id = ''
  `
-	args := []interface{}{s.cfg.ProjectKey, strings.TrimSpace(sessionID)}
+	args := []interface{}{s.tenantID(), s.cfg.ProjectKey, strings.TrimSpace(sessionID)}
 	if generation != nil {
 		query += ` AND session_generation = ?`
 		args = append(args, *generation)
@@ -494,9 +498,9 @@ func (s *Store) hasTurnCaptureDigestsForSession(ctx context.Context, sessionID s
 	query := `
 SELECT EXISTS(
   SELECT 1 FROM memory_turn_digests
-  WHERE project_key = ? AND session_id = ? AND capture_receipt_id <> ''
+  WHERE tenant_id = ? AND project_key = ? AND session_id = ? AND capture_receipt_id <> ''
 `
-	args := []interface{}{s.cfg.ProjectKey, strings.TrimSpace(sessionID)}
+	args := []interface{}{s.tenantID(), s.cfg.ProjectKey, strings.TrimSpace(sessionID)}
 	if generation != nil {
 		query += ` AND session_generation = ?`
 		args = append(args, *generation)
@@ -532,10 +536,10 @@ func (s *Store) previousTurnDigestMessageSeqEnd(ctx context.Context, sessionID s
 	query := `
 SELECT COALESCE(MAX(message_seq_end), 0)
 FROM memory_turn_digests
-WHERE project_key = ? AND session_id = ? AND digest_seq < ? AND message_seq_end > 0
+WHERE tenant_id = ? AND project_key = ? AND session_id = ? AND digest_seq < ? AND message_seq_end > 0
   AND status != 'invalidated'
 `
-	args := []interface{}{s.cfg.ProjectKey, strings.TrimSpace(sessionID), beforeDigestSeq}
+	args := []interface{}{s.tenantID(), s.cfg.ProjectKey, strings.TrimSpace(sessionID), beforeDigestSeq}
 	if generation != nil {
 		query += ` AND session_generation = ?`
 		args = append(args, *generation)
@@ -617,10 +621,10 @@ func (s *Store) listTurnDigestsForRollup(ctx context.Context, sessionID string, 
        rollup_status, COALESCE(rollup_window_id, ''),
        COALESCE(rolled_up_at, ''), created_at, updated_at, COALESCE(processed_at, '')
 FROM memory_turn_digests
-WHERE project_key = ? AND session_id = ? AND status = 'done'
+WHERE tenant_id = ? AND project_key = ? AND session_id = ? AND status = 'done'
   AND rollup_status IN ('pending', 'failed')
 `
-	args := []interface{}{s.cfg.ProjectKey, strings.TrimSpace(sessionID)}
+	args := []interface{}{s.tenantID(), s.cfg.ProjectKey, strings.TrimSpace(sessionID)}
 	if generation != nil {
 		query += ` AND session_generation = ?`
 		args = append(args, *generation)
@@ -673,10 +677,10 @@ func (s *Store) markTurnDigestsRollupSkipped(ctx context.Context, sessionID stri
 	query := `
 UPDATE memory_turn_digests
 SET rollup_status = 'skipped', rollup_window_id = NULL, rolled_up_at = NULL, updated_at = ?
-WHERE project_key = ? AND session_id = ? AND digest_seq <= ?
+WHERE tenant_id = ? AND project_key = ? AND session_id = ? AND digest_seq <= ?
   AND status = 'done' AND rollup_status IN ('pending', 'failed')
 `
-	args := []interface{}{now, s.cfg.ProjectKey, strings.TrimSpace(sessionID), maxSeq}
+	args := []interface{}{now, s.tenantID(), s.cfg.ProjectKey, strings.TrimSpace(sessionID), maxSeq}
 	if generation != nil {
 		query += ` AND session_generation = ?`
 		args = append(args, *generation)
@@ -725,11 +729,11 @@ func (s *Store) markTurnDigestsRolledUp(ctx context.Context, sessionID string, g
 	query := `
 UPDATE memory_turn_digests
 SET rollup_status = 'done', rollup_window_id = ?, rolled_up_at = ?, updated_at = ?
-WHERE project_key = ? AND session_id = ? AND digest_seq BETWEEN ? AND ?
+WHERE tenant_id = ? AND project_key = ? AND session_id = ? AND digest_seq BETWEEN ? AND ?
   AND status = 'done' AND rollup_status IN ('pending', 'failed')
 `
 	args := []interface{}{strings.TrimSpace(windowID), now, now,
-		s.cfg.ProjectKey, strings.TrimSpace(sessionID), startSeq, endSeq}
+		s.tenantID(), s.cfg.ProjectKey, strings.TrimSpace(sessionID), startSeq, endSeq}
 	if generation != nil {
 		query += ` AND session_generation = ?`
 		args = append(args, *generation)
@@ -797,7 +801,7 @@ SET status = ?, process_job_id = ?, last_error = ?,
         ELSE rolled_up_at
     END,
     updated_at = ?
-WHERE project_key = ? AND session_id = ? AND digest_seq <= ?
+WHERE tenant_id = ? AND project_key = ? AND session_id = ? AND digest_seq <= ?
   AND capture_receipt_id = ''
   AND status IN ('pending', 'processing', 'failed')
 `
@@ -805,7 +809,7 @@ WHERE project_key = ? AND session_id = ? AND digest_seq <= ?
 		string(status), processedAt,
 		string(status), string(status),
 		string(status), string(status),
-		now, s.cfg.ProjectKey, strings.TrimSpace(sessionID), maxSeq}
+		now, s.tenantID(), s.cfg.ProjectKey, strings.TrimSpace(sessionID), maxSeq}
 	if generation != nil {
 		query += ` AND session_generation = ?`
 		args = append(args, *generation)
@@ -835,8 +839,8 @@ func (s *Store) CountPendingTurnDigests(ctx context.Context, projectKey string) 
 	}
 	var count int
 	err = db.QueryRowContext(ctx, `
-SELECT COUNT(1) FROM memory_turn_digests WHERE project_key = ? AND status = 'pending'
-`, strings.TrimSpace(projectKey)).Scan(&count)
+SELECT COUNT(1) FROM memory_turn_digests WHERE tenant_id = ? AND project_key = ? AND status = 'pending'
+`, s.tenantID(), strings.TrimSpace(projectKey)).Scan(&count)
 	return count, err
 }
 
@@ -856,12 +860,12 @@ func (s *Store) ListPendingTurnCaptureSessions(ctx context.Context, minPending, 
 	rows, err := db.QueryContext(ctx, `
 SELECT project_key, session_id, session_generation, COUNT(1)
 FROM memory_turn_digests
-WHERE project_key = ? AND capture_receipt_id <> '' AND status = 'pending'
+WHERE tenant_id = ? AND project_key = ? AND capture_receipt_id <> '' AND status = 'pending'
 GROUP BY project_key, session_id, session_generation
 HAVING COUNT(1) >= ?
 ORDER BY MIN(digest_seq) ASC, session_id ASC, session_generation ASC
 LIMIT ?
-`, s.cfg.ProjectKey, minPending, limit)
+`, s.tenantID(), s.cfg.ProjectKey, minPending, limit)
 	if err != nil {
 		return nil, fmt.Errorf("memorystore: list pending turn capture sessions: %w", err)
 	}
@@ -897,10 +901,10 @@ func (s *Store) PruneTurnDigests(ctx context.Context, before time.Time) (int64, 
 	}
 	res, err := tx.ExecContext(ctx, `
 DELETE FROM memory_turn_digests
-WHERE project_key = ? AND status IN ('done', 'skipped', 'invalidated')
+WHERE tenant_id = ? AND project_key = ? AND status IN ('done', 'skipped', 'invalidated')
   AND rollup_status IN ('done', 'skipped')
   AND created_at < ?
-`, s.cfg.ProjectKey, before.UTC().Format(time.RFC3339Nano))
+`, s.tenantID(), s.cfg.ProjectKey, before.UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return 0, fmt.Errorf("memorystore: prune turn digests: %w", err)
 	}
@@ -921,8 +925,8 @@ func (s *Store) DeleteTurnDigestsForSession(ctx context.Context, sessionID strin
 		return 0, err
 	}
 	res, err := db.ExecContext(ctx, `
-DELETE FROM memory_turn_digests WHERE project_key = ? AND session_id = ?
-`, s.cfg.ProjectKey, strings.TrimSpace(sessionID))
+DELETE FROM memory_turn_digests WHERE tenant_id = ? AND project_key = ? AND session_id = ?
+`, s.tenantID(), s.cfg.ProjectKey, strings.TrimSpace(sessionID))
 	if err != nil {
 		return 0, fmt.Errorf("memorystore: delete turn digests: %w", err)
 	}
@@ -960,11 +964,11 @@ UPDATE memory_turn_digests
 SET status = 'invalidated', rollup_status = 'skipped',
     rollup_window_id = NULL, rolled_up_at = NULL,
     processed_at = ?, updated_at = ?
-WHERE project_key = ? AND session_id = ?
+WHERE tenant_id = ? AND project_key = ? AND session_id = ?
   AND status IN ('pending', 'processing', 'done', 'deferred', 'failed')
   AND rollup_status IN ('pending', 'failed')
 `
-	args := []interface{}{now, now, s.cfg.ProjectKey, strings.TrimSpace(sessionID)}
+	args := []interface{}{now, now, s.tenantID(), s.cfg.ProjectKey, strings.TrimSpace(sessionID)}
 	if generation != nil {
 		query += ` AND session_generation = ?`
 		args = append(args, *generation)

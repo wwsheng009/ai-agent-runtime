@@ -37,7 +37,7 @@ e.supersedes_id, e.revision, e.created_at, e.updated_at, e.last_used_at, e.use_c
 e.valid_from, e.valid_until, e.freshness_status, e.last_verified_at, e.revalidate_after,
 e.stale_reason, e.deleted_at, e.metadata_json, e.title, e.summary, e.canonical_id,
 e.superseded_by, e.archived, e.tenant_id, e.owner_id, e.agent_id, e.task_id,
-e.scope_kind, e.scope_key`
+e.scope_kind, e.scope_key, e.trust_level, e.trust_reason, e.trusted_at, e.feedback_score`
 )
 
 var memoryFTSTriggerSQL = []string{
@@ -260,27 +260,63 @@ func (s *Store) listRecordsFTS(
 	if !filter.IncludeArchived {
 		where = append(where, "e.archived = 0")
 	}
-	if filter.Status != "" {
-		where = append(where, "e.status = ?")
-		args = append(args, string(filter.Status))
+	statuses := make([]Status, 0, len(filter.Statuses)+1)
+	for _, status := range filter.Statuses {
+		if status = Status(strings.TrimSpace(string(status))); status != "" {
+			statuses = append(statuses, status)
+		}
+	}
+	if len(statuses) == 0 && filter.Status != "" {
+		statuses = append(statuses, filter.Status)
+	}
+	includesActive := len(statuses) == 0
+	if len(statuses) > 0 {
+		placeholders := make([]string, 0, len(statuses))
+		for _, status := range statuses {
+			if status == StatusActive {
+				includesActive = true
+			}
+			placeholders = append(placeholders, "?")
+			args = append(args, string(status))
+		}
+		where = append(where, "e.status IN ("+strings.Join(placeholders, ", ")+")")
 	} else {
 		where = append(where, "e.status = 'active'")
+		includesActive = true
 	}
-	if filter.Status == "" || filter.Status == StatusActive {
+	if includesActive {
 		where = append(where, "(e.valid_until IS NULL OR e.valid_until = '' OR e.valid_until > ?)")
 		args = append(args, now.Format(time.RFC3339Nano))
 	}
-	if filter.Kind != "" {
-		where = append(where, "e.kind = ?")
-		args = append(args, filter.Kind)
+	kinds := make([]string, 0, len(filter.Kinds)+1)
+	for _, kind := range filter.Kinds {
+		if kind = strings.TrimSpace(kind); kind != "" {
+			kinds = append(kinds, kind)
+		}
+	}
+	if len(kinds) == 0 && strings.TrimSpace(filter.Kind) != "" {
+		kinds = append(kinds, strings.TrimSpace(filter.Kind))
+	}
+	if len(kinds) > 0 {
+		placeholders := make([]string, 0, len(kinds))
+		for _, kind := range kinds {
+			placeholders = append(placeholders, "?")
+			args = append(args, kind)
+		}
+		where = append(where, "e.kind IN ("+strings.Join(placeholders, ", ")+")")
 	}
 	if sourceKind := strings.ToLower(strings.TrimSpace(filter.SourceKind)); sourceKind != "" {
 		where = append(where, "LOWER(e.source_kind) = ?")
 		args = append(args, sourceKind)
 	}
-	if strings.TrimSpace(filter.Tag) != "" {
-		where = append(where, "LOWER(e.tags_json) LIKE ?")
-		args = append(args, "%\""+strings.ToLower(strings.TrimSpace(filter.Tag))+"\"%")
+	if tags := normalizeTags(append(append([]string(nil), filter.Tags...), filter.Tag)); len(tags) > 0 {
+		for _, tag := range tags {
+			where = append(where, `EXISTS (
+  SELECT 1 FROM json_each(e.tags_json)
+  WHERE LOWER(CAST(value AS TEXT)) = ?
+)`)
+			args = append(args, tag)
+		}
 	}
 	if strings.TrimSpace(filter.SourceSessionID) != "" {
 		where = append(where, "e.source_session_id = ?")

@@ -55,8 +55,8 @@ SELECT COUNT(1),
          COALESCE(dead_letter_at, '') <> '' THEN 1 ELSE 0 END), 0),
        COALESCE(MIN(CASE WHEN status = 'pending' THEN NULLIF(created_at, '') END), '')
 FROM memory_jobs
-WHERE project_key = ?
-	`, nowText, nowText, nowText, nowText, nowText, nowText, nowText, s.cfg.ProjectKey).Scan(
+WHERE tenant_id = ? AND project_key = ?
+	`, nowText, nowText, nowText, nowText, nowText, nowText, nowText, s.tenantID(), s.cfg.ProjectKey).Scan(
 		&summary.TotalJobs, &summary.PendingDueJobs, &summary.PendingDeferredJobs,
 		&summary.LeasedJobs, &runningJobs, &summary.RetryableJobs, &summary.DeadLetterJobs,
 		&oldestPending,
@@ -72,25 +72,25 @@ WHERE project_key = ?
 	}
 	if err := db.QueryRowContext(ctx, `
 SELECT COUNT(1) FROM memory_jobs
-WHERE project_key = ?
+WHERE tenant_id = ? AND project_key = ?
   AND COALESCE(deadline_at, '') = ''
   AND status NOT IN ('succeeded', 'cancelled', 'dead_letter')
-`, s.cfg.ProjectKey).Scan(&summary.MissingDeadlineJobs); err != nil {
+`, s.tenantID(), s.cfg.ProjectKey).Scan(&summary.MissingDeadlineJobs); err != nil {
 		return summary, fmt.Errorf("memorystore: count jobs missing deadlines: %w", err)
 	}
-	if summary.ByKind, err = summarizeJobGroups(ctx, db, s.cfg.ProjectKey, "kind", summary.TotalJobs); err != nil {
+	if summary.ByKind, err = summarizeJobGroups(ctx, db, s.tenantID(), s.cfg.ProjectKey, "kind", summary.TotalJobs); err != nil {
 		return summary, err
 	}
-	if summary.ByStatus, err = summarizeJobGroups(ctx, db, s.cfg.ProjectKey, "status", summary.TotalJobs); err != nil {
+	if summary.ByStatus, err = summarizeJobGroups(ctx, db, s.tenantID(), s.cfg.ProjectKey, "status", summary.TotalJobs); err != nil {
 		return summary, err
 	}
-	if summary.ByPriority, err = summarizeJobGroups(ctx, db, s.cfg.ProjectKey, "priority", summary.TotalJobs); err != nil {
+	if summary.ByPriority, err = summarizeJobGroups(ctx, db, s.tenantID(), s.cfg.ProjectKey, "priority", summary.TotalJobs); err != nil {
 		return summary, err
 	}
 	return summary, nil
 }
 
-func summarizeJobGroups(ctx context.Context, db *sql.DB, projectKey, dimension string, total int) (JobCountGroups, error) {
+func summarizeJobGroups(ctx context.Context, db *sql.DB, tenantID, projectKey, dimension string, total int) (JobCountGroups, error) {
 	group := JobCountGroups{Counts: map[string]int{}}
 	column := ""
 	switch dimension {
@@ -104,8 +104,8 @@ func summarizeJobGroups(ctx context.Context, db *sql.DB, projectKey, dimension s
 		return group, fmt.Errorf("memorystore: unsupported job summary dimension")
 	}
 	rows, err := db.QueryContext(ctx, `SELECT `+column+`, COUNT(1) FROM memory_jobs
-WHERE project_key = ? GROUP BY `+column+` ORDER BY COUNT(1) DESC, `+column+` ASC LIMIT ?`,
-		projectKey, maxJobOperatorSummaryGroups)
+WHERE tenant_id = ? AND project_key = ? GROUP BY `+column+` ORDER BY COUNT(1) DESC, `+column+` ASC LIMIT ?`,
+		tenantID, projectKey, maxJobOperatorSummaryGroups)
 	if err != nil {
 		return group, fmt.Errorf("memorystore: group memory jobs by %s: %w", dimension, err)
 	}
@@ -133,8 +133,8 @@ WHERE project_key = ? GROUP BY `+column+` ORDER BY COUNT(1) DESC, `+column+` ASC
 	}
 	var distinctGroups int
 	if err := db.QueryRowContext(ctx,
-		`SELECT COUNT(DISTINCT `+column+`) FROM memory_jobs WHERE project_key = ?`,
-		projectKey,
+		`SELECT COUNT(DISTINCT `+column+`) FROM memory_jobs WHERE tenant_id = ? AND project_key = ?`,
+		tenantID, projectKey,
 	).Scan(&distinctGroups); err != nil {
 		return group, fmt.Errorf("memorystore: count memory job summary groups: %w", err)
 	}
@@ -168,8 +168,8 @@ func (s *Store) ListJobDiagnostics(ctx context.Context, f JobDiagnosticFilter) (
 	if err != nil {
 		return nil, err
 	}
-	where := []string{"project_key = ?"}
-	args := []interface{}{s.cfg.ProjectKey}
+	where := []string{"tenant_id = ?", "project_key = ?"}
+	args := []interface{}{s.tenantID(), s.cfg.ProjectKey}
 	for _, x := range []struct{ column, value string }{{"kind", f.Kind}, {"status", f.Status}, {"session_id", f.SessionID}} {
 		if strings.TrimSpace(x.value) != "" {
 			where = append(where, x.column+" = ?")
@@ -231,14 +231,18 @@ func (s *Store) operatorJobChange(ctx context.Context, id, action, reason string
 		}
 		var status, lease, retryAt, lastError string
 		var attempt int
-		err = tx.QueryRowContext(ctx, `SELECT status,COALESCE(lease_until,''),attempt,COALESCE(retry_at,''),COALESCE(last_error,'') FROM memory_jobs WHERE id=? AND project_key=?`, id, s.cfg.ProjectKey).Scan(&status, &lease, &attempt, &retryAt, &lastError)
+		err = tx.QueryRowContext(ctx, `
+SELECT status,COALESCE(lease_until,''),attempt,COALESCE(retry_at,''),COALESCE(last_error,'')
+FROM memory_jobs
+WHERE id=? AND tenant_id=? AND project_key=?
+`, id, s.tenantID(), s.cfg.ProjectKey).Scan(&status, &lease, &attempt, &retryAt, &lastError)
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrJobNotFound
 		}
 		if err != nil {
 			return err
 		}
-		if err = checkJobPurgeFenceByIDTx(ctx, tx, id, s.cfg.ProjectKey); err != nil {
+		if err = checkJobPurgeFenceByIDTx(ctx, tx, s.tenantID(), id, s.cfg.ProjectKey); err != nil {
 			return err
 		}
 		now := time.Now().UTC()
@@ -256,8 +260,15 @@ func (s *Store) operatorJobChange(ctx context.Context, id, action, reason string
 			next = string(JobStatusPending)
 			deadline := now.Add(DefaultMemoryJobTimeout).Format(time.RFC3339Nano)
 			var res sql.Result
-			res, err = tx.ExecContext(ctx, `UPDATE memory_jobs SET status='pending',worker_id=NULL,lease_until=NULL,retry_at=NULL,finished_at=NULL,dead_letter_at=NULL,dead_letter_reason=NULL,last_error='',available_at=?,deadline_at=?,updated_at=? WHERE id=? AND project_key=? AND status=? AND attempt=? AND COALESCE(lease_until,'')=?`,
-				now.Format(time.RFC3339Nano), deadline, now.Format(time.RFC3339Nano), id, s.cfg.ProjectKey, status, attempt, lease)
+			res, err = tx.ExecContext(ctx, `
+UPDATE memory_jobs
+SET status='pending',worker_id=NULL,lease_until=NULL,retry_at=NULL,finished_at=NULL,
+    dead_letter_at=NULL,dead_letter_reason=NULL,last_error='',available_at=?,deadline_at=?,
+    updated_at=?
+WHERE id=? AND tenant_id=? AND project_key=? AND status=? AND attempt=?
+  AND COALESCE(lease_until,'')=?
+`, now.Format(time.RFC3339Nano), deadline, now.Format(time.RFC3339Nano),
+				id, s.tenantID(), s.cfg.ProjectKey, status, attempt, lease)
 			if err == nil {
 				var affected int64
 				affected, err = res.RowsAffected()
@@ -271,8 +282,14 @@ func (s *Store) operatorJobChange(ctx context.Context, id, action, reason string
 			}
 			next = string(JobStatusDeadLetter)
 			var res sql.Result
-			res, err = tx.ExecContext(ctx, `UPDATE memory_jobs SET status='dead_letter',worker_id=NULL,lease_until=NULL,retry_at=NULL,finished_at=?,dead_letter_at=?,dead_letter_reason=?,last_error=?,updated_at=? WHERE id=? AND project_key=? AND status=? AND attempt=? AND COALESCE(lease_until,'')=?`,
-				now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), reason, reason, now.Format(time.RFC3339Nano), id, s.cfg.ProjectKey, status, attempt, lease)
+			res, err = tx.ExecContext(ctx, `
+UPDATE memory_jobs
+SET status='dead_letter',worker_id=NULL,lease_until=NULL,retry_at=NULL,finished_at=?,
+    dead_letter_at=?,dead_letter_reason=?,last_error=?,updated_at=?
+WHERE id=? AND tenant_id=? AND project_key=? AND status=? AND attempt=?
+  AND COALESCE(lease_until,'')=?
+`, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), reason, reason,
+				now.Format(time.RFC3339Nano), id, s.tenantID(), s.cfg.ProjectKey, status, attempt, lease)
 			if err == nil {
 				var affected int64
 				affected, err = res.RowsAffected()

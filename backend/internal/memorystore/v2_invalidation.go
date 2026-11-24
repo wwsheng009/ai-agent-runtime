@@ -106,7 +106,7 @@ func (s *Store) InvalidateSessionRange(ctx context.Context, sessionID string, in
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	digestRefs, err := queryInvalidationDigests(ctx, tx, s.cfg.ProjectKey, sessionID, inv.SessionGeneration, criteria, criteriaArgs)
+	digestRefs, err := queryInvalidationDigests(ctx, tx, s.tenantID(), s.cfg.ProjectKey, sessionID, inv.SessionGeneration, criteria, criteriaArgs)
 	if err != nil {
 		return result, err
 	}
@@ -139,12 +139,12 @@ func (s *Store) InvalidateSessionRange(ctx context.Context, sessionID string, in
 	for seq := range affectedDigestSeqs {
 		affectedDigestList = append(affectedDigestList, seq)
 	}
-	result.Digests, err = invalidateDigestSeqs(ctx, tx, s.cfg.ProjectKey, sessionID, inv.SessionGeneration, affectedDigestList, reason, now)
+	result.Digests, err = invalidateDigestSeqs(ctx, tx, s.tenantID(), s.cfg.ProjectKey, sessionID, inv.SessionGeneration, affectedDigestList, reason, now)
 	if err != nil {
 		return result, err
 	}
 
-	windows, err := queryInvalidationWindows(ctx, tx, s.cfg.ProjectKey, sessionID, inv.SessionGeneration)
+	windows, err := queryInvalidationWindows(ctx, tx, s.tenantID(), s.cfg.ProjectKey, sessionID, inv.SessionGeneration)
 	if err != nil {
 		return result, err
 	}
@@ -167,7 +167,7 @@ func (s *Store) InvalidateSessionRange(ctx context.Context, sessionID string, in
 	}
 	if len(affectedWindowSeqs) > 0 {
 		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(affectedWindowSeqs)), ",")
-		args := make([]interface{}, 0, 3+len(affectedWindowSeqs))
+		args := make([]interface{}, 0, 4+len(affectedWindowSeqs))
 		args = append(args, reason, now, now)
 		for _, seq := range affectedWindowSeqs {
 			args = append(args, seq)
@@ -177,11 +177,13 @@ func (s *Store) InvalidateSessionRange(ctx context.Context, sessionID string, in
 			windowScope = ` AND session_generation = ?`
 			args = append(args, *inv.SessionGeneration)
 		}
+		args = append(args, s.tenantID())
 		res, err := tx.ExecContext(ctx, `
 UPDATE memory_turn_windows
 SET status = 'invalidated', last_error = ?,
     processed_at = COALESCE(processed_at, ?), updated_at = ?
 WHERE window_seq IN (`+placeholders+`) AND status != 'invalidated'`+windowScope+`
+  AND tenant_id = ?
 `, args...)
 		if err != nil {
 			return result, fmt.Errorf("memorystore: invalidate window range: %w", err)
@@ -189,7 +191,7 @@ WHERE window_seq IN (`+placeholders+`) AND status != 'invalidated'`+windowScope+
 		result.Windows, _ = res.RowsAffected()
 	}
 
-	sourceRefs, err := queryInvalidationSources(ctx, tx, s.cfg.ProjectKey, sessionID, inv.SessionGeneration)
+	sourceRefs, err := queryInvalidationSources(ctx, tx, s.tenantID(), s.cfg.ProjectKey, sessionID, inv.SessionGeneration)
 	if err != nil {
 		return result, err
 	}
@@ -211,8 +213,8 @@ WHERE window_seq IN (`+placeholders+`) AND status != 'invalidated'`+windowScope+
 		res, err := tx.ExecContext(ctx, `
 UPDATE memory_entries SET freshness_status = 'stale', stale_reason = ?,
     revision = revision + 1, updated_at = ?
- WHERE id = ? AND project_key = ? AND revision = ?
-`, reason, now, memoryID, s.cfg.ProjectKey, revision)
+WHERE id = ? AND tenant_id = ? AND project_key = ? AND revision = ?
+	`, reason, now, memoryID, s.tenantID(), s.cfg.ProjectKey, revision)
 		if err != nil {
 			return result, err
 		}
@@ -229,7 +231,7 @@ UPDATE memory_entries SET freshness_status = 'stale', stale_reason = ?,
 		if err != nil {
 			return result, err
 		}
-		if err := appendCurrentRecordVersionTx(ctx, tx, memoryID, s.cfg.ProjectKey,
+		if err := s.appendCurrentRecordVersionTx(ctx, tx, memoryID, s.cfg.ProjectKey,
 			"system:invalidation", reason, "update", eventID); err != nil {
 			return result, err
 		}
@@ -278,14 +280,14 @@ func buildRangeDigestCriteria(cutoff, before int64, messageIDs, turnIDs []string
 	return "(" + strings.Join(clauses, " OR ") + ")", args
 }
 
-func queryInvalidationDigests(ctx context.Context, tx *sql.Tx, projectKey, sessionID string, generation *int64, criteria string, criteriaArgs []interface{}) ([]invalidationDigestRef, error) {
+func queryInvalidationDigests(ctx context.Context, tx *sql.Tx, tenantID, projectKey, sessionID string, generation *int64, criteria string, criteriaArgs []interface{}) ([]invalidationDigestRef, error) {
 	query := `
 SELECT digest_seq, COALESCE(turn_id, ''), COALESCE(user_message_id, ''),
        COALESCE(assistant_message_id, ''), message_seq_end, created_at
 FROM memory_turn_digests
-WHERE project_key = ? AND session_id = ?`
-	args := make([]interface{}, 0, 3+len(criteriaArgs))
-	args = append(args, projectKey, sessionID)
+WHERE tenant_id = ? AND project_key = ? AND session_id = ?`
+	args := make([]interface{}, 0, 4+len(criteriaArgs))
+	args = append(args, tenantID, projectKey, sessionID)
 	if generation != nil {
 		query += ` AND session_generation = ?`
 		args = append(args, *generation)
@@ -312,7 +314,7 @@ ORDER BY digest_seq ASC
 	return out, rows.Err()
 }
 
-func invalidateDigestSeqs(ctx context.Context, tx *sql.Tx, projectKey, sessionID string, generation *int64, digestSeqs []int64, reason, now string) (int64, error) {
+func invalidateDigestSeqs(ctx context.Context, tx *sql.Tx, tenantID, projectKey, sessionID string, generation *int64, digestSeqs []int64, reason, now string) (int64, error) {
 	if len(digestSeqs) == 0 {
 		return 0, nil
 	}
@@ -324,8 +326,8 @@ func invalidateDigestSeqs(ctx context.Context, tx *sql.Tx, projectKey, sessionID
 		}
 		batch := digestSeqs[start:end]
 		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(batch)), ",")
-		args := make([]interface{}, 0, 6+len(batch))
-		args = append(args, now, reason, now, projectKey, sessionID)
+		args := make([]interface{}, 0, 7+len(batch))
+		args = append(args, now, reason, now, projectKey, sessionID, tenantID)
 		generationFilter := ""
 		if generation != nil {
 			generationFilter = ` AND session_generation = ?`
@@ -340,6 +342,7 @@ SET status = 'invalidated', rollup_status = 'skipped',
     rollup_window_id = NULL, rolled_up_at = NULL,
     processed_at = ?, last_error = ?, updated_at = ?
 WHERE project_key = ? AND session_id = ? AND status != 'invalidated'
+  AND tenant_id = ?
   `+generationFilter+`
   AND digest_seq IN (`+placeholders+`)
 `, args...)
@@ -352,14 +355,14 @@ WHERE project_key = ? AND session_id = ? AND status != 'invalidated'
 	return total, nil
 }
 
-func queryInvalidationWindows(ctx context.Context, tx *sql.Tx, projectKey, sessionID string, generation *int64) ([]invalidationWindowRef, error) {
+func queryInvalidationWindows(ctx context.Context, tx *sql.Tx, tenantID, projectKey, sessionID string, generation *int64) ([]invalidationWindowRef, error) {
 	query := `
 SELECT window_seq, start_digest_seq, end_digest_seq,
        start_message_seq, end_message_seq, created_at
 FROM memory_turn_windows
-WHERE project_key = ? AND session_id = ?
+WHERE tenant_id = ? AND project_key = ? AND session_id = ?
 `
-	args := []interface{}{projectKey, sessionID}
+	args := []interface{}{tenantID, projectKey, sessionID}
 	if generation != nil {
 		query += ` AND session_generation = ?`
 		args = append(args, *generation)
@@ -403,19 +406,19 @@ func windowOverlapsInvalidation(window invalidationWindowRef, cutoff, before int
 	return window.startMessageSeq <= cutoff || window.startMessageSeq <= before, false
 }
 
-func queryInvalidationSources(ctx context.Context, tx *sql.Tx, projectKey, sessionID string, generation *int64) ([]invalidationSourceRef, error) {
+func queryInvalidationSources(ctx context.Context, tx *sql.Tx, tenantID, projectKey, sessionID string, generation *int64) ([]invalidationSourceRef, error) {
 	query := `
 SELECT e.id, e.revision, e.source_kind,
        COALESCE(src.turn_id, ''), COALESCE(src.message_ids_json, '[]'),
        COALESCE(src.source_window, ''), e.created_at
 FROM memory_entries e
 JOIN memory_sources src ON src.memory_id = e.id
-WHERE e.project_key = ? AND e.source_session_id = ?
+WHERE e.tenant_id = ? AND e.project_key = ? AND e.source_session_id = ?
   AND e.source_kind IN ('session_extract', 'turn_window')
   AND e.status IN ('candidate', 'active')
   AND e.freshness_status != 'stale'
 `
-	args := []interface{}{projectKey, sessionID}
+	args := []interface{}{tenantID, projectKey, sessionID}
 	if generation != nil {
 		query += ` AND e.source_session_generation = ? AND src.source_session_generation = ?`
 		args = append(args, *generation, *generation)

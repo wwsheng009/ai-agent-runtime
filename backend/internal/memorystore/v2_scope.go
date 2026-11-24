@@ -102,6 +102,19 @@ func (s *Store) defaultScopeContext() ScopeContext {
 	return scope
 }
 
+// ScopeContext returns the store's default scope identity for host adapters
+// that must validate an external durable event before persisting it.
+func (s *Store) ScopeContext() ScopeContext {
+	return s.defaultScopeContext()
+}
+
+func (s *Store) tenantID() string {
+	if s == nil {
+		return ""
+	}
+	return strings.TrimSpace(s.cfg.Scope.TenantID)
+}
+
 func normalizeScopeContext(scope, defaults ScopeContext) (ScopeContext, error) {
 	scope.TenantID = strings.TrimSpace(scope.TenantID)
 	scope.ProjectKey = strings.TrimSpace(scope.ProjectKey)
@@ -228,6 +241,13 @@ func (s *Store) normalizeRecordScope(ctx context.Context, record *Record) error 
 
 func memoryRecordContentHash(record Record) string {
 	kind := normalizeScopeKind(record.ScopeKind)
+	if record.Kind == "episodic" || record.Kind == "reflective" {
+		identity := strings.Join([]string{
+			record.TenantID, record.ProjectKey, string(kind), record.ScopeKey,
+			record.TaskID, record.SourceSessionID, strings.Join(record.SourceRefs, "\x00"),
+		}, "\x00")
+		return memoryContentHash(identity, record.ProjectKey, record.Kind, record.Text)
+	}
 	if kind == "" || kind == ScopeProject {
 		return memoryContentHash(string(ScopeProject), record.ProjectKey, record.Kind, record.Text)
 	}
@@ -281,6 +301,7 @@ WHERE LOWER(scope) IN ('user', 'profile', 'agent', 'session', 'task')
 		"memory_jobs",
 		"memory_summaries",
 		"memory_turn_digests",
+		"memory_turn_windows",
 		"memory_suppressions",
 	}
 	for _, table := range scopeTables {

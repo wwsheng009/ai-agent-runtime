@@ -146,6 +146,10 @@ type Record struct {
 	// that channel and must never be populated with Record.Text as a fallback.
 	SourceType              string                 `json:"source_type,omitempty"`
 	SourceTrust             string                 `json:"source_trust,omitempty"`
+	TrustLevel              TrustLevel             `json:"trust_level,omitempty"`
+	TrustReason             string                 `json:"trust_reason,omitempty"`
+	TrustedAt               time.Time              `json:"trusted_at,omitempty"`
+	FeedbackScore           float64                `json:"feedback_score,omitempty"`
 	SourceQuote             string                 `json:"-"`
 	SourceSessionID         string                 `json:"source_session_id,omitempty"`
 	SourceSessionGeneration int64                  `json:"source_session_generation,omitempty"`

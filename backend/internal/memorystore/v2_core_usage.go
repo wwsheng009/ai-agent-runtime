@@ -90,8 +90,8 @@ func (s *Store) RecordCoreExposure(ctx context.Context, exposure CoreExposure) (
 		err := tx.QueryRowContext(ctx, `
 SELECT version
 FROM memory_core
-WHERE id = ? AND project_key = ?
-`, coreID, s.cfg.ProjectKey).Scan(&version)
+WHERE id = ? AND tenant_id = ? AND project_key = ?
+`, coreID, s.tenantID(), s.cfg.ProjectKey).Scan(&version)
 		if err == sql.ErrNoRows {
 			result.Skipped++
 			continue
@@ -101,10 +101,10 @@ WHERE id = ? AND project_key = ?
 		}
 		if _, err := tx.ExecContext(ctx, `
 INSERT INTO memory_core_usage (
-    id, project_key, core_id, core_version, session_id, turn_id, message_id,
+    id, tenant_id, project_key, core_id, core_version, session_id, turn_id, message_id,
     used_at, use_kind
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-`, "core_usage_"+uuid.NewString(), s.cfg.ProjectKey, coreID, version, sessionID,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`, "core_usage_"+uuid.NewString(), s.tenantID(), s.cfg.ProjectKey, coreID, version, sessionID,
 			nullableString(exposure.TurnID), nullableString(exposure.MessageID),
 			usedAt.Format(time.RFC3339Nano), string(kind)); err != nil {
 			return result, err
@@ -129,8 +129,8 @@ func (s *Store) ListCoreUsage(ctx context.Context, filter CoreUsageFilter) ([]Co
 	if limit > 500 {
 		limit = 500
 	}
-	where := []string{"u.project_key = ?"}
-	args := []interface{}{s.cfg.ProjectKey}
+	where := []string{"u.tenant_id = ?", "u.project_key = ?"}
+	args := []interface{}{s.tenantID(), s.cfg.ProjectKey}
 	if coreID := strings.TrimSpace(filter.CoreID); coreID != "" {
 		where = append(where, "u.core_id = ?")
 		args = append(args, coreID)

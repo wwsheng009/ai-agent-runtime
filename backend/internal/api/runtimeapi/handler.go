@@ -150,6 +150,9 @@ type Handler struct {
 	sessionManager           *chat.SessionManager
 	memoryRuntimeMu          sync.RWMutex
 	memoryRuntime            *memoryruntime.Runtime
+	memoryRuntimes           map[string]*memoryruntime.Runtime
+	memoryRuntimeBootErrors  map[string]string
+	memoryRuntimeBuildMu     sync.Mutex
 	memoryRuntimeBootError   string
 	memorySessionEndCtx      context.Context
 	memorySessionEndCancel   context.CancelFunc
@@ -480,12 +483,14 @@ type ScopeResolverConfig struct {
 	Enabled          bool
 	TenantHeaders    []string
 	ProjectHeaders   []string
+	WorkspaceHeaders []string
 	UserHeaders      []string
 	RoleHeaders      []string
 	JWTClaimsEnabled bool
 	JWTSecret        string
 	TenantClaims     []string
 	ProjectClaims    []string
+	WorkspaceClaims  []string
 	UserClaims       []string
 	RoleClaims       []string
 	AdminRoles       []string
@@ -509,10 +514,12 @@ type authPolicyUpdateRequest struct {
 	JWTClaimsEnabled *bool                 `json:"jwt_claims_enabled,omitempty"`
 	TenantHeaders    []string              `json:"tenant_headers,omitempty"`
 	ProjectHeaders   []string              `json:"project_headers,omitempty"`
+	WorkspaceHeaders []string              `json:"workspace_headers,omitempty"`
 	UserHeaders      []string              `json:"user_headers,omitempty"`
 	RoleHeaders      []string              `json:"role_headers,omitempty"`
 	TenantClaims     []string              `json:"tenant_claims,omitempty"`
 	ProjectClaims    []string              `json:"project_claims,omitempty"`
+	WorkspaceClaims  []string              `json:"workspace_claims,omitempty"`
 	UserClaims       []string              `json:"user_claims,omitempty"`
 	RoleClaims       []string              `json:"role_claims,omitempty"`
 	AdminRoles       []string              `json:"admin_roles,omitempty"`
@@ -542,10 +549,11 @@ type usageTracker struct {
 }
 
 type UsageScope struct {
-	TenantID  string `json:"tenant_id"`
-	ProjectID string `json:"project_id"`
-	UserID    string `json:"user_id"`
-	ScopeKey  string `json:"scope_key"`
+	TenantID    string `json:"tenant_id"`
+	ProjectID   string `json:"project_id"`
+	WorkspaceID string `json:"workspace_id,omitempty"`
+	UserID      string `json:"user_id"`
+	ScopeKey    string `json:"scope_key"`
 	// Profile 是 FR-13 的 profile 维度：请求期解析出的 profile 身份
 	// （声明名 ProfileName 优先，回退 ref）。它只由实际解析 profile 的入口
 	// （AgentChat）填充，不参与配额身份（ScopeKey 仍是唯一配额键）；
@@ -1350,6 +1358,22 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/memory/records/{id}", h.DeleteMemoryRecord).Methods(http.MethodDelete)
 	runtimeRouter.HandleFunc("/memory/records/{id}/restore", h.RestoreMemoryRecord).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/memory/records/{id}/revalidate", h.RevalidateMemoryRecord).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/memory/episodes", h.ListMemoryEpisodes).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/memory/episodes/{id}", h.GetMemoryEpisode).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/memory/episodes/{id}/promote", h.PromoteMemoryEpisode).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/memory/patches", h.ListMemoryPatches).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/memory/patches", h.CreateMemoryPatch).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/memory/patches/{id}", h.GetMemoryPatch).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/memory/patches/{id}/approve", h.ApproveMemoryPatch).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/memory/patches/{id}/reject", h.RejectMemoryPatch).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/memory/patches/{id}/apply", h.ApplyMemoryPatch).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/memory/patches/{id}/rollback", h.RollbackMemoryPatch).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/memory/dreams", h.ListMemoryDreams).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/memory/dreams/run", h.RunMemoryDreams).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/memory/entities", h.ListMemoryEntities).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/memory/records/{id}/entities", h.ListMemoryRecordEntities).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/memory/records/{id}/feedback", h.RecordMemoryFeedback).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/memory/records/{id}/feedback", h.ListMemoryFeedback).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/memory/sessions/{id}/mode", h.SetMemorySessionMode).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/memory/sessions/{id}/context", h.GetMemorySessionContext).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/memory/recall-traces", h.ListMemoryRecallTraces).Methods(http.MethodGet)
@@ -7861,10 +7885,12 @@ func serializeScopeResolverPolicy(config ScopeResolverConfig) map[string]interfa
 		"jwt_secret_configured": strings.TrimSpace(config.JWTSecret) != "",
 		"tenant_headers":        append([]string(nil), config.TenantHeaders...),
 		"project_headers":       append([]string(nil), config.ProjectHeaders...),
+		"workspace_headers":     append([]string(nil), config.WorkspaceHeaders...),
 		"user_headers":          append([]string(nil), config.UserHeaders...),
 		"role_headers":          append([]string(nil), config.RoleHeaders...),
 		"tenant_claims":         append([]string(nil), config.TenantClaims...),
 		"project_claims":        append([]string(nil), config.ProjectClaims...),
+		"workspace_claims":      append([]string(nil), config.WorkspaceClaims...),
 		"user_claims":           append([]string(nil), config.UserClaims...),
 		"role_claims":           append([]string(nil), config.RoleClaims...),
 		"admin_roles":           append([]string(nil), config.AdminRoles...),
@@ -7960,12 +7986,14 @@ func cloneScopeResolverConfig(config ScopeResolverConfig) ScopeResolverConfig {
 		Enabled:          config.Enabled,
 		TenantHeaders:    append([]string(nil), config.TenantHeaders...),
 		ProjectHeaders:   append([]string(nil), config.ProjectHeaders...),
+		WorkspaceHeaders: append([]string(nil), config.WorkspaceHeaders...),
 		UserHeaders:      append([]string(nil), config.UserHeaders...),
 		RoleHeaders:      append([]string(nil), config.RoleHeaders...),
 		JWTClaimsEnabled: config.JWTClaimsEnabled,
 		JWTSecret:        strings.TrimSpace(config.JWTSecret),
 		TenantClaims:     append([]string(nil), config.TenantClaims...),
 		ProjectClaims:    append([]string(nil), config.ProjectClaims...),
+		WorkspaceClaims:  append([]string(nil), config.WorkspaceClaims...),
 		UserClaims:       append([]string(nil), config.UserClaims...),
 		RoleClaims:       append([]string(nil), config.RoleClaims...),
 		AdminRoles:       append([]string(nil), config.AdminRoles...),
@@ -8040,10 +8068,12 @@ func (h *Handler) updateScopeResolverConfig(update authPolicyUpdateRequest) Scop
 	if update.Replace {
 		current.TenantHeaders = nil
 		current.ProjectHeaders = nil
+		current.WorkspaceHeaders = nil
 		current.UserHeaders = nil
 		current.RoleHeaders = nil
 		current.TenantClaims = nil
 		current.ProjectClaims = nil
+		current.WorkspaceClaims = nil
 		current.UserClaims = nil
 		current.RoleClaims = nil
 		current.AdminRoles = nil
@@ -8057,10 +8087,12 @@ func (h *Handler) updateScopeResolverConfig(update authPolicyUpdateRequest) Scop
 	}
 	mergeOrReplaceStringList(&current.TenantHeaders, update.TenantHeaders, update.Replace, false)
 	mergeOrReplaceStringList(&current.ProjectHeaders, update.ProjectHeaders, update.Replace, false)
+	mergeOrReplaceStringList(&current.WorkspaceHeaders, update.WorkspaceHeaders, update.Replace, false)
 	mergeOrReplaceStringList(&current.UserHeaders, update.UserHeaders, update.Replace, false)
 	mergeOrReplaceStringList(&current.RoleHeaders, update.RoleHeaders, update.Replace, false)
 	mergeOrReplaceStringList(&current.TenantClaims, update.TenantClaims, update.Replace, false)
 	mergeOrReplaceStringList(&current.ProjectClaims, update.ProjectClaims, update.Replace, false)
+	mergeOrReplaceStringList(&current.WorkspaceClaims, update.WorkspaceClaims, update.Replace, false)
 	mergeOrReplaceStringList(&current.UserClaims, update.UserClaims, update.Replace, false)
 	mergeOrReplaceStringList(&current.RoleClaims, update.RoleClaims, update.Replace, false)
 	mergeOrReplaceStringList(&current.AdminRoles, update.AdminRoles, update.Replace, true)
@@ -8240,9 +8272,10 @@ func (h *Handler) resolveUsageScope(r *http.Request, tenantID, projectID, userID
 	apiKeyScope := h.resolveScopeFromAPIKey(r)
 	resolvedUserID := h.resolveUsageScopeValue(userID, r, "user_id", config.UserHeaders, jwtScope.UserID, apiKeyScope.UserID)
 	return normalizeUsageScope(UsageScope{
-		TenantID:  h.resolveUsageScopeValue(tenantID, r, "tenant_id", config.TenantHeaders, jwtScope.TenantID, apiKeyScope.TenantID),
-		ProjectID: h.resolveUsageScopeValue(projectID, r, "project_id", config.ProjectHeaders, jwtScope.ProjectID, apiKeyScope.ProjectID),
-		UserID:    h.resolveServerSessionUserID(resolvedUserID),
+		TenantID:    h.resolveUsageScopeValue(tenantID, r, "tenant_id", config.TenantHeaders, jwtScope.TenantID, apiKeyScope.TenantID),
+		ProjectID:   h.resolveUsageScopeValue(projectID, r, "project_id", config.ProjectHeaders, jwtScope.ProjectID, apiKeyScope.ProjectID),
+		WorkspaceID: h.resolveUsageScopeValue("", r, "workspace_id", config.WorkspaceHeaders, jwtScope.WorkspaceID, apiKeyScope.WorkspaceID),
+		UserID:      h.resolveServerSessionUserID(resolvedUserID),
 	})
 }
 
@@ -8251,14 +8284,17 @@ func (h *Handler) resolveUsageScopeFilter(r *http.Request, tenantID, projectID, 
 	jwtScope := h.resolveScopeFromJWTClaims(r)
 	rawTenant := h.resolveUsageScopeValue(tenantID, r, "tenant_id", config.TenantHeaders, jwtScope.TenantID)
 	rawProject := h.resolveUsageScopeValue(projectID, r, "project_id", config.ProjectHeaders, jwtScope.ProjectID)
+	rawWorkspace := h.resolveUsageScopeValue("", r, "workspace_id", config.WorkspaceHeaders, jwtScope.WorkspaceID)
 	rawUser := h.resolveUsageScopeValue(userID, r, "user_id", config.UserHeaders, jwtScope.UserID)
-	if strings.TrimSpace(rawTenant) == "" && strings.TrimSpace(rawProject) == "" && strings.TrimSpace(rawUser) == "" {
+	if strings.TrimSpace(rawTenant) == "" && strings.TrimSpace(rawProject) == "" &&
+		strings.TrimSpace(rawWorkspace) == "" && strings.TrimSpace(rawUser) == "" {
 		return UsageScope{}, false
 	}
 	return normalizeUsageScope(UsageScope{
-		TenantID:  rawTenant,
-		ProjectID: rawProject,
-		UserID:    rawUser,
+		TenantID:    rawTenant,
+		ProjectID:   rawProject,
+		WorkspaceID: rawWorkspace,
+		UserID:      rawUser,
 	}), true
 }
 
@@ -8305,9 +8341,10 @@ func (h *Handler) resolveScopeFromJWTClaims(r *http.Request) UsageScope {
 		return UsageScope{}
 	}
 	return UsageScope{
-		TenantID:  firstClaimValue(claims, config.TenantClaims...),
-		ProjectID: firstClaimValue(claims, config.ProjectClaims...),
-		UserID:    firstClaimValue(claims, config.UserClaims...),
+		TenantID:    firstClaimValue(claims, config.TenantClaims...),
+		ProjectID:   firstClaimValue(claims, config.ProjectClaims...),
+		WorkspaceID: firstClaimValue(claims, config.WorkspaceClaims...),
+		UserID:      firstClaimValue(claims, config.UserClaims...),
 	}
 }
 

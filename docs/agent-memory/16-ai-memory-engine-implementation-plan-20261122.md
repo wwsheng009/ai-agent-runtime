@@ -2162,3 +2162,676 @@ ok
 - CLI/tool 调用面尚未传 `ScopeContext`；当前用户身份接入 API 显式 admin 参数，不等于完整 tenant/user/agent/task 全链路；
 - export/import 尚无 scope manifest，import 仍拒绝非 project scope；
 - 真实 `.aicli/memory/memory.db` 尚未执行 v24 migration；本轮只使用临时 SQLite fixture 验证。
+
+### 19.13 G2-4 多 workspace memory runtime 路由（2026-11-23）
+
+本轮补齐 runtime-server 的 per-workspace memory runtime registry。目标不是让一个 workspace 的 runtime 兜底处理另一个 workspace，而是每个 canonical workspace 一个独立 runtime/store。
+
+已实施：
+
+- Handler 增加 `memoryRuntimes` registry 与 per-workspace boot error；canonical path 统一使用绝对路径、`filepath.Clean` 和 `EvalSymlinks`，Windows 下 key 大小写不敏感；
+- `SetMemoryRuntime` 把默认 runtime 同步注册到 registry，替换默认 runtime 时从 registry 移除旧默认，避免 registry 持有已关闭 store；
+- `MemoryRuntimeForWorkspace` 只返回同一 canonical workspace 的 runtime；未知 workspace 返回 nil，不回退到默认 runtime；
+- `EnableMemoryRuntimeForWorkspace` 按 workspace 构建 runtime，构建串行化（`memoryRuntimeBuildMu`），失败写 per-workspace boot error；`memory.mode=off` 不创建 DB；
+- `TriggerMemorySessionEnd` 从 session metadata 的 `workspace_path` 解析 session workspace，路由到对应 runtime；缺失时按该 workspace 创建，创建失败只记录日志并跳过；
+- `BindMemoryDigestInvalidation` 同样按事件 session 的 workspace 路由，不再使用默认 runtime 处理其他 workspace；
+- `RunMemoryIdleSweep` 与 `RunMemoryConsolidation` 遍历 registry 快照，按 canonical workspace 排序逐个执行并聚合计数；单个 workspace 失败不会阻止其他 workspace 继续；
+- `CloseMemoryRuntime` 关闭 registry 中全部 runtime/store，并先持有 build lock，避免 shutdown 与并发 workspace 构建竞争；
+- memory HTTP API 的 `workspace_path` 解析：普通调用仍只能访问配置 workspace；admin 可以访问存在的绝对路径 workspace，且返回 canonical path；非绝对路径或不可访问目录 fail closed；
+- 所有 memory workspace 路径统一 canonicalize，避免 symlink/`..`/大小写变体绕过隔离。
+
+测试覆盖：
+
+- registry 按 canonical workspace 查找、未知 workspace 不回退默认；
+- 两个 workspace runtime 同时存在、关闭后 registry 清空；
+- per-workspace boot error 不影响其他 workspace；
+- 未配置 LLM/session manager 时按 workspace 构建失败且不注册 runtime；
+- admin 可跨 workspace，普通调用不可跨 workspace，不存在的目录 fail closed；
+- status 使用目标 workspace 的 registry runtime；
+- admin 跨 workspace 创建记录写入目标 store，不污染配置 workspace。
+- idle sweep 对多个 workspace 都发起调用并聚合错误；
+- RunResult / ConsolidationResult 跨 workspace 聚合计数与错误。
+
+本轮实际验证（并行 supervision 修改期间先用 Go overlay 将 `internal/supervision` 映射到 HEAD 版本隔离验证；该修改随后恢复可编译，已去掉 overlay 按主工作区真实状态复跑）：
+
+```text
+go test -overlay=.tmp/g24-overlay.json ./internal/api/runtimeapi -run 'TestMemory' -count=1
+ok
+
+go test -overlay=.tmp/g24-overlay.json ./internal/memoryruntime ./internal/memoryassembly -count=1
+ok
+
+go test -overlay=.tmp/g24-overlay.json ./cmd/aicli/commands -run 'TestMemory|TestStructuredMemory|TestChatMemory' -count=1
+ok
+
+go test ./internal/memorystore -count=1
+ok
+
+go build -overlay=.tmp/g24-overlay.json -o .tmp/aicli-4x-g2-4.exe ./cmd/aicli
+ok
+
+go test ./internal/api/runtimeapi -run 'TestMemory' -count=1
+ok
+
+go test ./internal/memoryruntime ./internal/memoryassembly -count=1
+ok
+
+go test ./cmd/aicli/commands -run 'TestMemory|TestStructuredMemory|TestChatMemory' -count=1
+ok
+
+go test ./internal/memorystore -count=1
+ok
+
+go build -o .tmp/aicli-4x-g2-4-normal.exe ./cmd/aicli
+ok
+```
+
+仍未完成：
+
+- jobs/digests/summaries/events 的运营查询 scope 化仍未完成；
+- CLI/tool 仍未携带完整 `ScopeContext`；
+- real dogfood DB 仍未迁移到 v24。
+
+### 19.14 G4 Episode / Patch-first / Dreaming 基线（2026-11-23）
+
+本轮把 G4 从“未实施”推进到“可运行基线”，仍不声称模型驱动 Dreaming 和完整审核运营面已经全部关闭。
+
+已实施：
+
+- migration v26：`memory_episodes`、`memory_patches`、`memory_dream_runs`；
+- `memoryruntime.StoreTaskCompletionConsumer`：durable task-terminal event 生成 `episodic` candidate，必须有 source event IDs；task completion hook 已接入 `memoryassembly`；
+- Episode 成功/失败/部分完成/blocked/cancelled outcome；失败 Episode 保留 failure reason，kind 仍为 `episodic`，不会被当作 procedure 晋升；
+- Episode 幂等键包含 project/task/session/outcome/source event IDs，重复事件不会重复建记录；Episode content hash 额外包含 task/session/source refs，避免相同文本跨 task 碰撞；
+- Patch-first 模型：proposed/approved/rejected/applied/rolled_back/failed；expected revision、applied revision、rollback version、patch audit event；
+- 支持 add/update/merge/delete/supersede；低风险可显式 auto-approve，medium/high 默认要求审核；
+- apply 写 memory versions/events/FTS；rollback 使用版本恢复；add patch rollback 保留 tombstone；
+- `RunDreamPipeline` 当前使用确定性 fallback：只读取 durable Episode，生成 medium-risk `reflective` patch，不直接写 memory_entries；
+- API：
+  - `/memory/episodes`、`/memory/episodes/{id}`、`/memory/episodes/{id}/promote`
+  - `/memory/patches`、`/memory/patches/{id}`、`approve|reject|apply|rollback`
+  - `/memory/dreams`、`/memory/dreams/run`
+- CLI：
+  - `/memory episodes`
+  - `/memory patches`
+  - `/memory patch approve|reject|apply|rollback`
+  - `/memory dream run`
+
+覆盖测试：
+
+- durable source required、Episode 幂等、成功/失败/partial outcome；
+- 缺来源不能晋升；
+- add/update patch 审核、apply、rollback；
+- high-risk reject 不写 memory；
+- low-risk auto-apply + FTS 可见；
+- patch scope 隔离；
+- Dream pipeline 从两个 Episode 生成可审 patch；
+- API 端到端 Episode → dream → patch approve → apply → rollback。
+
+### 19.15 G5 Trust / Feedback / Entity / RRF / Eval 基线（2026-11-23）
+
+已实施：
+
+- migration v27：`trust_level`、`trust_reason`、`trusted_at`、`feedback_score`；`memory_entities`、`memory_entity_links`、`memory_feedback`；
+- trust 默认规则：
+  - manual → `user_explicit`
+  - correction → `user_confirmed`
+  - tool/web/repo/external → `untrusted_external`
+  - 自动抽取 → `agent_inference`
+- trust promotion guard：untrusted external 不能晋升为 procedure/workflow/policy；
+- 注入文本增加 `[trust=...]`；untrusted procedure/workflow/policy 不进入普通注入；
+- feedback：
+  - helpful/irrelevant/stale/incorrect；
+  - feedback_score 进入 recall 轻量加权；
+  - stale/incorrect 标记 freshness stale、写 revision/version/audit；
+  - tool `memory_feedback`、CLI `/memory feedback`、HTTP feedback API；
+- entity：
+  - 规则化抽取 error code、version、path、uppercase constant；
+  - record insert 时自动 upsert entity + link；
+  - `SearchRecords` 在文本/FTS 结果后追加 entity-only 命中，返回 `entity` / `hybrid` backend；
+  - entity/record entities API；
+- evaluation：
+  - `backend/internal/memoryeval`；
+  - Recall@K、MRR、p50/p95 latency；
+  - 固定临时 corpus 测试；
+- `MemoryMetrics` 增加 trust/feedback/patch/dream/entity 计数；现有 `/memory/metrics` 返回扩展字段。
+
+仍未完成：
+
+- G4 Dreaming 仍是 deterministic fallback，尚无模型分析器、token/cost 预算与完整 shadow 策略；
+- G4 `memory_dream_run` / `memory_patch_*` agent tool 面尚未全部注册；
+- G5 vector retrieval、完整 RRF 可解释 rank/score 明细、shadow 运营、完整 retrieval/poisoned/dreaming corpus 和 CI 门禁仍未完成；
+- G2 jobs/digests/summaries/events 的运营 scope 审计仍未完成；
+- G0-5 真实 dogfood 库恢复仍未执行；
+- G3.5 既有未完成项仍保留。
+
+验证（`backend`）：
+
+```text
+go test ./internal/memorystore -count=1
+ok
+
+go test ./internal/api/runtimeapi -run 'TestMemory' -count=1
+ok
+
+go test ./internal/contextmgr ./internal/memoryruntime ./internal/memoryassembly ./internal/memoryeval -count=1
+ok
+
+go test ./cmd/aicli/commands -run 'TestMemory|TestStructuredMemory|TestChatMemory' -count=1
+ok
+
+go test ./internal/toolkit/tools -run 'TestMemory' -count=1
+ok
+
+go test ./internal/tools -run 'TestMemory' -count=1
+ok
+
+go test -tags win7compat ./internal/memorystore -run 'TestMemoryScope|TestFTS5CapabilityProbe|TestTaskCompletionEpisode|TestPatch|TestTrustDefaults|TestEntityAutoLink|TestFeedbackChanges' -count=1
+ok
+
+go build -o .tmp/aicli-4x-g4-g5.exe ./cmd/aicli
+ok
+
+git diff --check
+ok
+```
+
+### 19.16 G2 turn digest / turn window tenant/scope 快照（2026-11-23）
+
+本轮继续补齐 turn 运营面：
+
+- migration v29：
+  - `memory_turn_digests` 的 legacy turn / capture receipt 唯一索引加入 `tenant_id`；
+  - 重建 `memory_turn_windows`，增加 `tenant_id`、`scope_kind`、`scope_key`；
+  - window 唯一键改为 `(tenant_id, project_key, session_id, session_generation, start_digest_seq, end_digest_seq)`；
+  - 新增 window tenant/scope 查询索引；
+- `RecordTurnDigest` / `MaterializeTurnCapture` 写入 tenant/project scope 快照；
+- digest/window 的 get/list/count/status/rollup/invalidate/prune/purge/delete 路径统一按 tenant + project + session/generation 过滤；
+- capture materialization / digest replay 创建的 phase-1 job 写入 tenant/scope，并在解析时按 tenant 过滤；
+- invalidation 的 digest/window 查询与更新加入 tenant 条件；
+- session purge 与 project reset 的 digest/window 删除加入 tenant 条件。
+
+#### tenant 概念来源
+
+tenant 不是本轮新增概念：
+
+- 参考设计 `docs/agent-memory/references/AI_Agent_Memory_Engine_Design.md` 的
+  §6 scope hierarchy 与 §14 security/governance 已定义
+  `tenant_id` 以及 tenant/user/project isolation；
+- `docs/agent-memory/15-ai-memory-engine-design-gap-audit-20261122.md`
+  的 `GAP-P0-02` 明确要求 tenant/user/agent/task scope；
+- 既有提交 `a4fca327 feat(memory): enforce scoped tenant/owner/agent/task isolation`
+  已通过 migration v24 为 `memory_entries`、`memory_jobs`、`memory_summaries`、
+  `memory_turn_digests` 等表加入 tenant/scope 列和 `ScopeContext`；
+- 本轮只是把尚未覆盖的 turn digest/window 读写路径补齐到该既有隔离模型。
+
+语义边界：
+
+- `project_key` 是 workspace/项目；
+- `tenant_id` 是共享数据库/服务部署下的数据归属边界；
+- 单机、单 workspace 默认 `tenant_id=''`，行为保持 legacy project scope；
+- API 只有在显式允许时从请求读取 tenant，普通客户端默认不暴露 tenant 选择器。
+
+新增测试：
+
+```text
+TestMemoryTurnOperationalQueriesAreTenantScoped
+```
+
+覆盖：
+
+- 两个 tenant 同库、同 project、同 session、同 turn 可各自存在 digest；
+- `ListPendingTurnDigests` / `CountPendingTurnDigests` / `Status` 互不可见；
+- `GetTurnDigestByID` / `GetTurnWindow` 跨 tenant 返回 `sql.ErrNoRows`；
+- 同 project/session/generation/digest range 可各自存在 window；
+- `ListTurnWindows` 互不可见；
+- window 状态迁移不能跨 tenant；
+- 物理行写入正确的 `tenant_id='tenant-a'`、`scope_kind='project'`、`scope_key=<project>`。
+
+验证：
+
+```text
+go test ./internal/memorystore -count=1
+ok
+
+go test ./internal/api/runtimeapi -run 'TestMemory' -count=1
+ok
+
+go test ./internal/contextmgr ./internal/memoryruntime ./internal/memoryassembly ./internal/memoryeval -count=1
+ok
+
+go test ./cmd/aicli/commands -run 'TestMemory|TestStructuredMemory|TestChatMemory' -count=1
+ok
+
+go test ./internal/toolkit/tools -run 'TestMemory' -count=1
+ok
+
+go test ./internal/tools -run 'TestMemory' -count=1
+ok
+
+go test -tags win7compat ./internal/memorystore -run 'TestMemoryTurnOperationalQueriesAreTenantScoped|TestTurnDigest|TestTurnWindow|TestMaterializeTurnCapture|TestCommitTurnCapture|TestMemoryJobOperationalQueriesAreTenantScoped|TestMemorySummaryOperationalQueriesAreTenantScoped|TestFTS5CapabilityProbe' -count=1
+ok
+
+go build -o .tmp/aicli-4x-g2-turn.exe ./cmd/aicli
+ok
+
+git diff --check
+ok
+```
+
+仍未完成：
+
+- capture receipt 的 `memory_turn_capture_generations` 物理键尚未加入 tenant；
+- phase-1 job 的物理唯一键仍为 `(kind, scope, project_key, job_key)`；
+- `memory_turn_output_receipts` 已写入 tenant/scope 快照，但表级唯一约束尚未加入 tenant；
+- tenant 多实例共享数据库的真实 runtime-server 路由测试尚未执行。
+
+### 19.17 G2 summary tenant/scope 快照（2026-11-23）
+
+本轮继续补齐 summary 运营面：
+
+- migration v28：
+  - 重建 `idx_memory_summaries_active`，唯一键为 `(tenant_id, project_key, scope_kind, scope_key, summary_kind)`；
+  - 新增 `(tenant_id, project_key, status, revision DESC)` 查询索引；
+- `CompileSummary` 写入 `tenant_id`、`scope_kind='project'`、`scope_key=project_key`；
+- active summary supersede / revision allocation / artifact-current check 均带 tenant；
+- `GetSummary`、`ListSummaries`、`ActiveSummary`、`GatedActiveSummary`、`RetireActiveSummary`、`EnqueueStaleSummaryRebuilds`、`Status` summary 字段均按 tenant/scope 过滤；
+- 测试 `TestMemorySummaryOperationalQueriesAreTenantScoped`：
+  - 两个 tenant 同库各自有一个 active summary；
+  - `ListSummaries` / `ActiveSummary` 互不可见。
+
+已知限制：
+
+- `memory_summaries` 旧表约束 `UNIQUE(scope, project_key, summary_kind, revision)` 仍存在，无法通过普通 `ALTER TABLE` 删除；当前通过“project 内全局 revision”避免跨 tenant revision 冲突；
+- 若未来要求 tenant-local revision，需要重建 `memory_summaries` 表并迁移 `memory_summary_items` 外键。
+
+仍未完成：
+
+- `memory_turn_digests` / `memory_turn_windows` tenant/scope 写入与查询过滤；
+- `memory_events` / recall trace 全写路径 scope 快照；
+- export/import/purge/audit 的 summary scope manifest；
+- CLI/tool 完整 `ScopeContext`。
+
+验证：
+
+```text
+go test ./internal/memorystore -run 'TestMemorySummaryOperationalQueriesAreTenantScoped' -count=1
+ok
+
+go test ./internal/memorystore -count=1
+ok
+
+go test ./internal/api/runtimeapi -run 'TestMemory' -count=1
+ok
+
+go test ./internal/contextmgr ./internal/memoryruntime ./internal/memoryassembly ./internal/memoryeval -count=1
+ok
+
+go test ./cmd/aicli/commands -run 'TestMemory|TestStructuredMemory|TestChatMemory' -count=1
+ok
+
+go test ./internal/toolkit/tools -run 'TestMemory' -count=1
+ok
+
+go test ./internal/tools -run 'TestMemory' -count=1
+ok
+
+go build -o .tmp/aicli-4x-g2-summary.exe ./cmd/aicli
+ok
+
+git diff --check
+ok
+```
+
+### 19.18 G2 运营 job tenant/scope 快照（2026-11-23）
+
+本轮优先补齐 P0 中最高风险的 job 运营面：
+
+- `EnsureJob`、`EnqueueCoreRebuild`、`enqueueSummaryRebuild`、digest replay job 写入 `tenant_id`、`scope_kind`、`scope_key` 快照；
+- `ListJobs`、`SummarizeJobs`、`ListJobDiagnostics`、`Status` 的 job/extraction backlog 查询按当前 tenant/project 过滤；
+- job summary 分组查询与 missing-deadline 统计同步按 tenant 过滤；
+- 新增双 tenant 同库测试，验证：
+  - 两个 tenant 的 job 可共存；
+  - `ListJobs` / `SummarizeJobs` / `Status` / `ListJobDiagnostics` 互不可见。
+
+仍未完成：
+
+- `memory_turn_digests` / `memory_turn_windows` / `memory_summaries` 的 tenant/scope 写入与查询过滤尚未全部接线；
+- `memory_summaries` 的 active unique index 尚未把 tenant 纳入唯一键；
+- job 唯一约束当前仍为 `(kind, scope, project_key, job_key)`，tenant 尚未进入物理唯一键；当前通过查询过滤和每 tenant 独立 job key 控制风险；
+- `memory_events` / recall trace 的 tenant/scope 快照仍只覆盖 schema，未覆盖全部写路径；
+- CLI/tool 仍未携带完整 `ScopeContext`。
+
+验证：
+
+```text
+go test ./internal/memorystore -run 'TestMemoryJobOperationalQueriesAreTenantScoped|TestSummarizeJobs|TestClaimJobs' -count=1
+ok
+
+go test ./internal/memorystore -count=1
+ok
+
+go test ./internal/api/runtimeapi -run 'TestMemory' -count=1
+ok
+
+go test ./internal/contextmgr ./internal/memoryruntime ./internal/memoryassembly ./internal/memoryeval -count=1
+ok
+
+go test ./cmd/aicli/commands -run 'TestMemory|TestStructuredMemory|TestChatMemory' -count=1
+ok
+
+go test ./internal/toolkit/tools -run 'TestMemory' -count=1
+ok
+
+go test ./internal/tools -run 'TestMemory' -count=1
+ok
+
+go build -o .tmp/aicli-4x-g2-ops.exe ./cmd/aicli
+ok
+
+git diff --check
+ok
+```
+
+### 19.19 记忆主链路接线修复（2026-11-23）
+
+本轮修复两个实际断点，而不是新增记忆能力。
+
+#### 1. durable task terminal event -> Episode
+
+新增：
+
+- `backend/internal/memorytaskbridge`：
+  - 订阅 `task.completed` / `task.failed` / `task.cancelled`；
+  - 同时兼容 `team.task.*` 归一化事件；
+  - 从 durable team event、team store、teammate/session identity 解析
+    task/team/session/generation；
+  - 构造有界 `TaskCompletionEvent`，source event 使用稳定
+    `team_task:<team>:<task>:<outcome>`；
+- runtime-server：
+  - memory boot 后调用 `BindMemoryTaskCompletionEvents`；
+  - 按 session workspace 解析/创建对应 memory runtime；
+- aicli：
+  - team lifecycle bus 绑定后调用 `bindMemoryTaskCompletionEvents`；
+  - host 内只绑定一次；
+- `HandleTaskCompletionEvent`：
+  - 不再依赖 `generation.trigger=task_completion`；
+  - 不再被 `GenerationDisabled` 阻断；
+  - 缺省 session generation 时从 canonical session identity 补齐；
+  - Episode 允许 subagent/team session，不再套用 transcript extraction 的
+    `IncludeSubagents` / idle 门槛；
+  - SessionMode disabled/polluted、workspace、project、tenant 仍严格校验。
+
+Episode 仍只创建为 candidate，不自动晋升 active。
+
+#### 2. 自动注入接入 entity/hybrid 检索
+
+`SelectForInjectV2` 的 query recall 从 `ListRecords(FTS/LIKE)` 改为统一的
+`SearchRecords`：
+
+- 保留 FTS5/LIKE；
+- 增加 entity-only / hybrid 候选；
+- retrieval hit score 作为最小匹配信号进入 deterministic ranking；
+- 仍经过 active/freshness/private/secret/trust/suppression/budget 过滤；
+- entity-only 命中不再因为文本 token 不匹配而被 `scoreRecordForRecall` 丢弃。
+
+#### 修复的编译阻塞
+
+工作区中既有的 team replan 改动存在两处编译错误：
+
+- `lead_planner.InitialPlan` 引用未定义的 `expectedVersion`；
+- `SQLiteStore.PersistTaskPlanWithVersion` 的 dependency `ExecContext`
+  漏写 `if err != nil`。
+
+已做最小修复，使 `internal/team`、runtime-server、aicli 可编译。
+
+#### 新增/更新测试
+
+```text
+TestConsumeTeamTaskCompletionCreatesEpisode
+TestHandleTaskCompletionIsIndependentOfExtractionTrigger
+TestHandleTaskCompletionResolvesSessionGeneration
+TestSelectForInjectV2IncludesEntityOnlyHybridMatch
+```
+
+验证：
+
+```text
+go test ./internal/memorystore -count=1
+ok
+
+go test ./internal/memoryruntime -count=1
+ok
+
+go test ./internal/memorytaskbridge -count=1
+ok
+
+go test ./internal/team -count=1
+ok
+
+go test ./internal/api/runtimeapi -run 'TestMemory|TestTeam' -count=1
+ok
+
+go test ./cmd/aicli/commands -run 'TestMemory|TestTeam|TestChatMemory' -count=1
+ok
+
+go test -tags win7compat ./internal/memorystore -run 'TestSelectForInjectV2IncludesEntityOnlyHybridMatch|TestSelectForInjectV2NoMatchKeepsEmptySelection|TestMemoryTurnOperationalQueriesAreTenantScoped|TestFTS5CapabilityProbe' -count=1
+ok
+
+go build -o .tmp/aicli-4x-memory-gap.exe ./cmd/aicli
+ok
+
+go build -o .tmp/runtime-server-4x-memory-gap.exe ./cmd/runtime-server
+ok
+
+git diff --check
+ok
+```
+
+仍未完成：
+
+- Patch/Dreaming 的写操作仍只通过 HTTP/CLI 暴露；只读审查工具见 §19.20；
+- Dreaming 自动调度已在 §19.21 接入，默认关闭；
+- `memoryeval` 仍不是生产/CI 门禁；
+- 真实 dogfood 数据上的 Episode 去重、task session 选择与召回质量仍需验证。
+
+### 19.20 G4 只读审查工具接线（2026-11-23）
+
+本轮补齐 Agent 可见的 G4 审查面，但不暴露高风险写操作：
+
+| 工具 | 作用 | 性质 |
+|---|---|---|
+| `memory_episodes` | 查询 task-completion Episodes | 只读 |
+| `memory_patches` | 查询 proposed/approved/applied 等 patch 队列 | 只读 |
+| `memory_patch_read` | 读取单个 patch 及 evidence | 只读 |
+| `memory_dreams` | 查询 Dreaming run 历史 | 只读 |
+
+安全边界：
+
+- 四个工具均要求 `memory.mode=on` 且 `memory.tools.enabled=true`；
+- patch approve/apply/rollback 与 dream run 仍只允许 operator/HTTP/CLI；
+- Episode 查询带 `session_id` 时只允许当前会话，跨会话需要 admin 授权；
+- 同步补齐 `toolregistry` 声明与 `policy` taxonomy。
+
+同时修复既有注册漂移：
+
+- `memory_feedback` 已存在于 toolkit 构造表，但缺失 `toolregistry` / `policy`
+  声明，导致内置工具契约测试失败；本轮一并补齐。
+
+新增测试：
+
+```text
+TestMemoryG4ReadOnlyTools
+```
+
+验证：
+
+```text
+go test ./internal/toolkit/tools -count=1
+ok
+
+go test ./internal/tools -count=1
+ok
+
+go test ./internal/policy -count=1
+ok
+```
+
+仍未完成：
+
+- patch approve/apply/rollback 未注册为 agent tools（当前有意保持人工审核）；
+- `memory_dream_run` 未注册为 agent tool（运行 Dreaming 仍由 operator/HTTP/CLI
+  控制）；
+- Dreaming 的 token/cost 预算与 shadow 模式仍未实现。
+
+### 19.21 Dreaming 自动调度与审核队列合并（2026-11-23）
+
+本轮把 Dreaming 接入 maintenance，但保持默认关闭和人工审核。
+
+配置：
+
+```yaml
+memory:
+  dreaming:
+    enabled: false
+    interval: 24h
+    limit: 20
+    maxTokens: 800
+    shadow: false
+    retentionDays: 30
+    provider: ""
+    model: ""
+    reasoningEffort: ""
+```
+
+行为：
+
+- `enabled=false`：不启动 Dreaming ticker，不改变现有部署；
+- `enabled=true`：
+  - maintenance 按 `interval` 运行 bounded Dreaming；
+  - 只在至少有 2 个 durable Episode 时运行；
+  - 若上一次 Dreaming run 仍在 `running`，本轮跳过；
+  - 用 Episode memory ids 计算 `dreaming_source_hash`；
+  - 相同 source hash 的 patch 已存在时跳过，即使它已被 approve/reject；
+  - source hash 由 `memory_dream_sources` 持久索引；
+  - migration v33 从既有 Dreaming patch metadata 回填 legacy source/run；
+  - `Force=true` 的显式调用可绕过 source 去重；
+  - patch content 受 `maxTokens` 硬预算约束；
+  - `shadow=true` 时只记录 Dreaming run、reflection preview 与 model，
+    不创建 patch，不进入审核队列；
+  - shadow run 的 reflection preview 默认保留 30 天；
+  - maintenance 按 `retentionDays` 清理过期 shadow run；
+  - HTTP `/memory/dreams/run` 支持请求级 `shadow=true`；
+  - HTTP 支持 `force=true`，CLI 支持 `/memory dream run [limit] [--shadow] [--force]`；
+  - 若 workspace memory runtime 已启动，优先使用模型驱动 analyzer；
+  - Dreaming provider/model/effort 可独立配置；空值继承 consolidation 或 extraction；
+  - analyzer 不可用或输出不安全时回落到确定性 reflection，并记录 warning；
+  - patch metadata 记录 `dream_model`；
+  - 只创建 `medium` risk 的 reviewable patch；
+  - 不自动 approve/apply；
+- `limit` 上限 100，`maxTokens` 上限 4000。
+
+实现：
+
+- `MemoryDreamingConfig`
+- `memoryassembly.MaintenanceEnabled` / `deriveMaintenanceSchedule`
+- `memoryassembly.RunDreamingStage`
+- maintenance Dreaming ticker + `dreaming` stage
+- `memorystore.DreamSourceHash`
+- `memorystore.DreamSourceExists`
+- `memoryruntime.LLMDreamAnalyzer`
+- `Runtime.RunDreaming`
+- factory 装配 DreamAnalyzer；Dreaming 配置为空时继承 consolidation/extraction
+- CLI `/memory dream run` 在 runtime 可用时走 analyzer
+
+新增测试：
+
+```text
+TestMaintenanceDreamingScheduleIsOptInAndUsesConfiguredInterval
+TestRunDreamingStageCreatesOneProposedPatchAndCoalesces
+TestMaintenanceDreamingSchedulerRunsBoundedWorker
+TestDreamPipelineHonorsTokenBudget
+TestDreamPipelineUsesBoundedAnalyzer
+TestDreamPipelineFallsBackWhenAnalyzerFails
+TestDreamPipelineShadowRecordsReflectionWithoutPatch
+TestRunDreamingStageShadowRecordsPreviewWithoutPatch
+TestDreamPipelineDedupesSourceAcrossCallsAndForceBypasses
+TestDreamSourceRegistryBackfillFromLegacyPatch
+TestPruneShadowDreamRunsKeepsPatchedRuns
+```
+
+验证：
+
+```text
+go test ./internal/config -count=1
+ok
+
+go test ./internal/memoryassembly -count=1
+ok
+
+go test ./internal/memorystore -count=1
+ok
+
+go test ./internal/memoryruntime -count=1
+ok
+
+go test ./internal/api/runtimeapi -run 'TestMemory' -count=1
+ok
+
+go test ./cmd/aicli/commands -run 'TestMemory|TestTeam|TestChatMemory' -count=1
+ok
+
+go build -o .tmp/aicli-4x-memory-dream.exe ./cmd/aicli
+ok
+
+go build -o .tmp/runtime-server-4x-memory-dream.exe ./cmd/runtime-server
+ok
+```
+
+仍未完成：
+
+- Patched Dreaming run 的保留策略仍与 patch audit 保留策略独立。
+
+### 19.22 自动注入质量评测基线（2026-11-23）
+
+本轮把评测从“统一检索”扩展到“自动注入主路径”。
+
+新增：
+
+- `memoryeval.EvaluateInjection`：
+  - 直接调用 `SelectForInjectV2`；
+  - 对 selection IDs 计算 Recall@1、Recall@3、MRR、p50/p95 latency；
+  - 支持 scope；
+- `MinRecallAt1` 从无效字段变为真实门禁：
+  - retrieval 与 injection 都会记录 `Pass`；
+  - 低于阈值时进入 `FailedCases`；
+  - 不改变底层检索结果，只用于评测判定。
+
+新增测试：
+
+```text
+TestInjectionCorpusIncludesLexicalAndEntityRecall
+TestInjectionQualityGateExcludesUnsafeRecords
+```
+
+覆盖：
+
+- lexical query 能命中 active session-extract 记录；
+- entity-only query 能进入自动注入 selection；
+- 两个 case 的 Recall@1 与 MRR 均为 1；
+- threshold 门禁通过。
+- private / stale / expired / archived / deleted / untrusted external workflow
+  不会进入自动注入。
+
+验证：
+
+```text
+go test ./internal/memoryeval -count=1
+ok
+```
+
+仍未完成：
+
+- `memoryeval` 尚未成为 CI 强制门禁；
+- 没有真实 dogfood corpus；
+- poisoned recall 已有 baseline，仍缺更完整的 adversarial corpus；
+- 没有生成式答案质量与 citation correctness 评测。

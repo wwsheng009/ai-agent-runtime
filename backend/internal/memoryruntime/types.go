@@ -27,8 +27,9 @@ const (
 	// from a live transcript or streaming event.
 	TriggerTurnThreshold Trigger = "turn_threshold"
 	// TriggerTaskCompletion is the reserved G4 lifecycle hook. The hook accepts
-	// only a durable task terminal event and may consume already-frozen capture
-	// ranges, but it does not create/promote Episode memories by itself.
+	// only a durable task terminal event and creates one candidate Episode.
+	// Episode capture is independent of the extraction trigger and never invokes
+	// the transcript extractor.
 	TriggerTaskCompletion Trigger = "task_completion"
 )
 
@@ -76,6 +77,9 @@ type Config struct {
 	ConsolidationProvider     string
 	// Empty stage overrides inherit ExtractionReasoningEffort.
 	ConsolidationReasoningEffort string
+	DreamingModel                string
+	DreamingProvider             string
+	DreamingReasoningEffort      string
 	WindowSummaryReasoningEffort string
 	Summarizer                   ProjectSummaryGenerator
 
@@ -311,8 +315,7 @@ type Extractor interface {
 // AgentControl/team task terminal event. SourceEventID is required so an
 // in-memory notification cannot be mistaken for a durable completion. The
 // memory runtime intentionally keeps this payload bounded and does not depend
-// on the team package. Episode persistence is deliberately outside this G0
-// hook until the G4 schema/patch pipeline exists.
+// on the team package.
 type TaskCompletionEvent struct {
 	TenantID          string
 	ProjectKey        string
@@ -334,9 +337,9 @@ type TaskCompletionEvent struct {
 	Timestamp         time.Time
 }
 
-// TaskCompletionConsumer is the future G4 Episode boundary. Implementations
-// must durably enqueue or persist the bounded event and may not infer task
-// completion from a transcript.
+// TaskCompletionConsumer is the durable G4 Episode boundary. Implementations
+// must persist the bounded event and may not infer task completion from a
+// transcript.
 type TaskCompletionConsumer interface {
 	ConsumeTaskCompletion(context.Context, TaskCompletionEvent) error
 }

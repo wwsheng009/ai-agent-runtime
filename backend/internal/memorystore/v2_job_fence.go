@@ -11,12 +11,12 @@ import (
 // checkJobPurgeFenceByIDTx prevents legacy jobs that cannot prove their
 // session incarnation from being claimed or completed after a purge. Jobs with
 // structured generation identity use the normal generation-aware fence.
-func checkJobPurgeFenceByIDTx(ctx context.Context, tx *sql.Tx, id, expectedProject string) error {
+func checkJobPurgeFenceByIDTx(ctx context.Context, tx *sql.Tx, tenantID, id, expectedProject string) error {
 	query := `
 SELECT kind, job_key, project_key, COALESCE(session_id, ''), session_generation,
        COALESCE(capture_receipt_id, '')
-FROM memory_jobs WHERE id = ?`
-	args := []interface{}{id}
+FROM memory_jobs WHERE id = ? AND tenant_id = ?`
+	args := []interface{}{id, strings.TrimSpace(tenantID)}
 	if strings.TrimSpace(expectedProject) != "" {
 		query += " AND project_key = ?"
 		args = append(args, strings.TrimSpace(expectedProject))
@@ -33,14 +33,14 @@ FROM memory_jobs WHERE id = ?`
 		return fmt.Errorf("memorystore: read job purge identity: %w", err)
 	}
 	return checkJobPurgeFenceIdentityTx(
-		ctx, tx, projectKey, kind, jobKey, sessionID, generation, receiptID,
+		ctx, tx, tenantID, projectKey, kind, jobKey, sessionID, generation, receiptID,
 	)
 }
 
 func checkJobPurgeFenceIdentityTx(
 	ctx context.Context,
 	tx *sql.Tx,
-	projectKey, kind, jobKey, sessionID string,
+	tenantID, projectKey, kind, jobKey, sessionID string,
 	generation int64,
 	receiptID string,
 ) error {
@@ -55,26 +55,26 @@ func checkJobPurgeFenceIdentityTx(
 			if !sessionScoped {
 				return nil
 			}
-			return checkLegacySessionPurgeFenceTx(ctx, tx, projectKey, sessionID)
+			return checkLegacySessionPurgeFenceTx(ctx, tx, tenantID, projectKey, sessionID)
 		}
 		// Older receipt-backed rows may carry a session and receipt but predate
 		// the generation column being populated.  They cannot use the strict
 		// incarnation fence, but they must still be blocked once that session
 		// has any purge tombstone.
 		if sessionID != "" && generation <= 0 && strings.TrimSpace(receiptID) != "" {
-			return checkLegacySessionPurgeFenceTx(ctx, tx, projectKey, sessionID)
+			return checkLegacySessionPurgeFenceTx(ctx, tx, tenantID, projectKey, sessionID)
 		}
 		if sessionID == "" || generation <= 0 || strings.TrimSpace(receiptID) == "" {
 			return fmt.Errorf("%w: v2 job lacks a complete session identity", ErrSessionPurgeGenerationMismatch)
 		}
-		return checkSessionPurgeGenerationTx(ctx, tx, projectKey, sessionID, generation)
+		return checkSessionPurgeGenerationTx(ctx, tx, tenantID, projectKey, sessionID, generation)
 	}
 
 	if sessionID != "" {
 		if generation > 0 {
-			return checkSessionPurgeGenerationTx(ctx, tx, projectKey, sessionID, generation)
+			return checkSessionPurgeGenerationTx(ctx, tx, tenantID, projectKey, sessionID, generation)
 		}
-		return checkLegacySessionPurgeFenceTx(ctx, tx, projectKey, sessionID)
+		return checkLegacySessionPurgeFenceTx(ctx, tx, tenantID, projectKey, sessionID)
 	}
 	if generation != 0 || strings.TrimSpace(receiptID) != "" {
 		return fmt.Errorf("%w: job has incomplete session identity", ErrSessionPurgeGenerationMismatch)
@@ -87,7 +87,7 @@ func checkJobPurgeFenceIdentityTx(
 	if !sessionScoped {
 		return nil
 	}
-	return checkLegacySessionPurgeFenceTx(ctx, tx, projectKey, sessionID)
+	return checkLegacySessionPurgeFenceTx(ctx, tx, tenantID, projectKey, sessionID)
 }
 
 // legacyJobSessionIdentity recognizes only the stable session-key formats
@@ -120,12 +120,12 @@ func legacyJobSessionIdentity(projectKey, jobKey string) (sessionID string, sess
 // incarnation from a recreated session using the same ID. Once any tombstone
 // exists, it must therefore stay quarantined rather than being treated as
 // evidence of a strict generation fence.
-func checkLegacySessionPurgeFenceTx(ctx context.Context, tx *sql.Tx, projectKey, sessionID string) error {
+func checkLegacySessionPurgeFenceTx(ctx context.Context, tx *sql.Tx, tenantID, projectKey, sessionID string) error {
 	var exists int
 	err := tx.QueryRowContext(ctx, `
 SELECT 1 FROM memory_session_purges
-WHERE project_key = ? AND session_id = ?
-`, strings.TrimSpace(projectKey), strings.TrimSpace(sessionID)).Scan(&exists)
+WHERE tenant_id = ? AND project_key = ? AND session_id = ?
+`, strings.TrimSpace(tenantID), strings.TrimSpace(projectKey), strings.TrimSpace(sessionID)).Scan(&exists)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
@@ -151,8 +151,8 @@ func checkRecordSessionPurgeFenceTx(
 		return nil
 	}
 	if record.SourceSessionGeneration > 0 {
-		return checkSessionPurgeGenerationTx(ctx, tx, record.ProjectKey,
+		return checkSessionPurgeGenerationTx(ctx, tx, record.TenantID, record.ProjectKey,
 			sessionID, record.SourceSessionGeneration)
 	}
-	return checkLegacySessionPurgeFenceTx(ctx, tx, record.ProjectKey, sessionID)
+	return checkLegacySessionPurgeFenceTx(ctx, tx, record.TenantID, record.ProjectKey, sessionID)
 }

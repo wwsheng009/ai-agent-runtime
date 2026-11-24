@@ -33,6 +33,7 @@ func startRuntimeServerMemoryRuntime(ctx context.Context, handler *runtimeapi.Ha
 	handler.SetMemoryRuntimeLifecycleContext(ctx)
 	sweepCtx, cancel := context.WithCancel(ctx)
 	unsubscribeDigestInvalidation := handler.BindMemoryDigestInvalidation()
+	unsubscribeTaskCompletion := handler.BindMemoryTaskCompletionEvents()
 	stopMaintenance := memoryassembly.StartMaintenance(sweepCtx, memoryassembly.MaintenanceOptions{
 		Runtime: rt,
 		Config:  cfg,
@@ -44,6 +45,9 @@ func startRuntimeServerMemoryRuntime(ctx context.Context, handler *runtimeapi.Ha
 	return func() {
 		if unsubscribeDigestInvalidation != nil {
 			unsubscribeDigestInvalidation()
+		}
+		if unsubscribeTaskCompletion != nil {
+			unsubscribeTaskCompletion()
 		}
 		cancel()
 		stopMaintenance()

@@ -96,6 +96,16 @@ func memoryContentHash(scope, projectKey, kind, text string) string {
 // Query match is a hard gate for non-empty queries; recency, usage, confidence,
 // and semantic-kind boosts only reorder records that actually matched.
 func scoreRecordForRecall(record Record, tokens []string, rawQuery string, now time.Time) float64 {
+	return scoreRecordForRecallWithRetrieval(record, tokens, rawQuery, now, 0)
+}
+
+// scoreRecordForRecallWithRetrieval lets the unified search path contribute a
+// bounded retrieval signal (for example an entity-only match) without letting
+// an unrelated record bypass the query gate. A positive retrieval score only
+// establishes the minimum match; recency, usage and quality still rank it.
+func scoreRecordForRecallWithRetrieval(
+	record Record, tokens []string, rawQuery string, now time.Time, retrievalScore float64,
+) float64 {
 	text := strings.ToLower(strings.TrimSpace(record.NormalizedText))
 	if text == "" {
 		text = strings.ToLower(record.Text)
@@ -126,12 +136,18 @@ func scoreRecordForRecall(record Record, tokens []string, rawQuery string, now t
 				match += 0.5
 			}
 		}
-		if match <= 0 {
+		if match <= 0 && retrievalScore <= 0 {
 			return 0
+		}
+		if match <= 0 {
+			match = 1
 		}
 	}
 
 	score := match
+	if retrievalScore > 0 {
+		score += math.Min(0.5, retrievalScore*10)
+	}
 	if kind == "correction" {
 		score += 1.0
 	} else if kind == "decision" || kind == "preference" {
@@ -157,6 +173,12 @@ func scoreRecordForRecall(record Record, tokens []string, rawQuery string, now t
 			usageAgeDays = math.Max(0, now.Sub(usedAt).Hours()/24)
 		}
 		score += 0.65 * math.Log1p(float64(record.UseCount)) * math.Exp(-usageAgeDays/30)
+	}
+	if record.FeedbackScore != 0 {
+		score += 0.25 * math.Max(-4, math.Min(4, record.FeedbackScore))
+	}
+	if record.TrustLevel == TrustUntrustedExternal {
+		score *= 0.75
 	}
 	return score
 }
@@ -328,10 +350,11 @@ SELECT id, scope, project_key, summary_kind, revision, status, freshness_status,
        summary, summary_tokens, source_count, input_watermark, generated_at,
        model, content_hash, record_ids_json, metadata_json
 FROM memory_summaries
-WHERE scope = ? AND project_key = ? AND summary_kind = 'long_term'
+WHERE tenant_id = ? AND scope = ? AND project_key = ? AND scope_kind = 'project' AND scope_key = ?
+  AND summary_kind = 'long_term'
   AND status = 'active' AND freshness_status = 'fresh'
 ORDER BY revision DESC LIMIT 1
-`, string(ScopeProject), s.cfg.ProjectKey).Scan(
+`, s.tenantID(), string(ScopeProject), s.cfg.ProjectKey, s.cfg.ProjectKey).Scan(
 		&summaryID, &scope, &projectKey, &kind, &revision, &status, &freshness,
 		&text, &tokens, &sourceCount, &watermark, &generatedAt, &model,
 		&contentHash, &recordIDsJSON, &metadataJSON,
@@ -465,7 +488,7 @@ func (s *Store) invalidateSummary(ctx context.Context, db *sql.DB, summary Summa
 		return err
 	}
 	jobKey := summary.ID + ":" + summary.InputWatermark
-	if _, err := enqueueSummaryRebuild(ctx, tx, jobKey, string(summary.Scope), summary.ProjectKey, summary.InputWatermark); err != nil {
+	if _, err := enqueueSummaryRebuild(ctx, tx, s.tenantID(), jobKey, string(summary.Scope), summary.ProjectKey, summary.InputWatermark); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -530,21 +553,23 @@ SELECT status, freshness_status, content_hash, revision FROM memory_entries WHER
 	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(ctx, `
 UPDATE memory_summaries SET status = 'superseded'
-WHERE scope = ? AND project_key = ? AND summary_kind = ? AND status = 'active'
-`, string(summary.Scope), summary.ProjectKey, summary.SummaryKind); err != nil {
+WHERE tenant_id = ? AND scope = ? AND project_key = ? AND scope_kind = 'project' AND scope_key = ?
+  AND summary_kind = ? AND status = 'active'
+`, s.tenantID(), string(summary.Scope), summary.ProjectKey, summary.ProjectKey, summary.SummaryKind); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO memory_summaries (
     id, scope, project_key, summary_kind, revision, status, freshness_status,
     summary, summary_tokens, source_count, input_watermark, generated_at,
-    model, content_hash, record_ids_json, metadata_json
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}')
+    model, content_hash, record_ids_json, metadata_json,
+    tenant_id, scope_kind, scope_key
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, 'project', ?)
 `, summary.ID, string(summary.Scope), summary.ProjectKey, summary.SummaryKind,
 		summary.Revision, summary.Status, string(summary.Freshness), summary.Text,
 		summary.TokenEstimate, len(itemIDs), summary.InputWatermark,
 		summary.GeneratedAt.UTC().Format(time.RFC3339Nano), summary.Model,
-		summary.ContentHash, string(recordIDs)); err != nil {
+		summary.ContentHash, string(recordIDs), s.tenantID(), summary.ProjectKey); err != nil {
 		return err
 	}
 	for rank, id := range itemIDs {
@@ -563,8 +588,8 @@ func (s *Store) markSummariesStaleForRecordTx(ctx context.Context, tx *sql.Tx, r
 SELECT s.id, s.input_watermark, s.scope, s.project_key
 FROM memory_summaries s
 JOIN memory_summary_items i ON i.summary_id = s.id
-WHERE i.memory_id = ? AND s.status = 'active'
-`, recordID)
+WHERE i.memory_id = ? AND s.tenant_id = ? AND s.project_key = ? AND s.status = 'active'
+`, recordID, s.tenantID(), s.cfg.ProjectKey)
 	if err != nil {
 		return err
 	}
@@ -582,10 +607,12 @@ WHERE i.memory_id = ? AND s.status = 'active'
 	}
 	_ = rows.Close()
 	for _, summary := range summaries {
-		if _, err := tx.ExecContext(ctx, `UPDATE memory_summaries SET freshness_status = 'stale' WHERE id = ?`, summary.id); err != nil {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE memory_summaries SET freshness_status = 'stale' WHERE id = ? AND tenant_id = ? AND project_key = ?`,
+			summary.id, s.tenantID(), s.cfg.ProjectKey); err != nil {
 			return err
 		}
-		if _, err := enqueueSummaryRebuild(ctx, tx, summary.id+":"+summary.watermark,
+		if _, err := enqueueSummaryRebuild(ctx, tx, s.tenantID(), summary.id+":"+summary.watermark,
 			summary.scope, summary.projectKey, summary.watermark); err != nil {
 			return err
 		}
@@ -597,13 +624,14 @@ type sqlExecer interface {
 	ExecContext(context.Context, string, ...interface{}) (sql.Result, error)
 }
 
-func enqueueSummaryRebuild(ctx context.Context, execer sqlExecer, jobKey, scope, projectKey, watermark string) (int, error) {
+func enqueueSummaryRebuild(ctx context.Context, execer sqlExecer, tenantID, jobKey, scope, projectKey, watermark string) (int, error) {
 	now := nowText()
 	result, err := execer.ExecContext(ctx, `
 INSERT INTO memory_jobs (
     id, kind, job_key, scope, project_key, status, priority, attempt,
-    max_attempts, input_watermark, created_at, updated_at, deadline_at
- ) VALUES (?, 'summary_rebuild', ?, ?, ?, 'pending', ?, 0, 3, ?, ?, ?, ?)
+    max_attempts, input_watermark, created_at, updated_at, deadline_at,
+    tenant_id, scope_kind, scope_key
+ ) VALUES (?, 'summary_rebuild', ?, ?, ?, 'pending', ?, 0, 3, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(kind, scope, project_key, job_key) DO UPDATE SET
     status = 'pending',
     worker_id = NULL,
@@ -615,7 +643,8 @@ ON CONFLICT(kind, scope, project_key, job_key) DO UPDATE SET
     updated_at = excluded.updated_at
 WHERE memory_jobs.status IN ('failed', 'succeeded', 'cancelled')
 	`, "job_"+uuid.NewString(), jobKey, scope, projectKey, JobPrioritySummaryRebuild, watermark, now, now,
-		parseTime(now).Add(DefaultMemoryJobTimeout).Format(time.RFC3339Nano))
+		parseTime(now).Add(DefaultMemoryJobTimeout).Format(time.RFC3339Nano),
+		tenantID, string(ScopeProject), projectKey)
 	if err != nil {
 		return 0, err
 	}
@@ -762,7 +791,8 @@ SELECT id, scope, project_key, kind, status, text, normalized_text, tags_json,
        created_at, updated_at, last_used_at, use_count, valid_from, valid_until,
        freshness_status, last_verified_at, revalidate_after, stale_reason,
        deleted_at, metadata_json, title, summary, canonical_id, superseded_by, archived,
-       tenant_id, owner_id, agent_id, task_id, scope_kind, scope_key
+       tenant_id, owner_id, agent_id, task_id, scope_kind, scope_key,
+       trust_level, trust_reason, trusted_at, feedback_score
  FROM memory_entries WHERE ` + strings.Join(where, " AND ") + `
 ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?`
 	args = append(args, limit+1, offset)
@@ -843,7 +873,8 @@ SELECT id, scope, project_key, kind, status, text, normalized_text, tags_json,
        created_at, updated_at, last_used_at, use_count, valid_from, valid_until,
        freshness_status, last_verified_at, revalidate_after, stale_reason,
        deleted_at, metadata_json, title, summary, canonical_id, superseded_by, archived,
-       tenant_id, owner_id, agent_id, task_id, scope_kind, scope_key
+       tenant_id, owner_id, agent_id, task_id, scope_kind, scope_key,
+       trust_level, trust_reason, trusted_at, feedback_score
  FROM memory_entries WHERE id = ? AND `+scopePredicate+`
  `, args...)
 	record, err := scanRecordColumns(row)
@@ -970,7 +1001,9 @@ func scanRecordColumns(row rowScanner) (Record, error) {
 		title, summary, canonicalID, supersededBy   sql.NullString
 		tenantID, ownerID, agentID, taskID          sql.NullString
 		scopeKind, scopeKey                         sql.NullString
+		trustLevel, trustReason, trustedAt          sql.NullString
 		confidence                                  float64
+		feedbackScore                               float64
 		sensitivity                                 sql.NullString
 		pinned                                      int
 		revision, useCount, sourceSessionGeneration int64
@@ -984,6 +1017,7 @@ func scanRecordColumns(row rowScanner) (Record, error) {
 		&freshness, &lastVerifiedAt, &revalidateAfter, &staleReason, &deletedAt,
 		&metadataJSON, &title, &summary, &canonicalID, &supersededBy, &archived,
 		&tenantID, &ownerID, &agentID, &taskID, &scopeKind, &scopeKey,
+		&trustLevel, &trustReason, &trustedAt, &feedbackScore,
 	); err != nil {
 		return Record{}, err
 	}
@@ -991,6 +1025,8 @@ func scanRecordColumns(row rowScanner) (Record, error) {
 		ID: id.String, Scope: Scope(scope.String), ScopeKind: Scope(scopeKind.String),
 		ScopeKey: scopeKey.String, TenantID: tenantID.String, OwnerID: ownerID.String,
 		AgentID: agentID.String, TaskID: taskID.String, ProjectKey: projectKey.String,
+		TrustLevel: TrustLevel(trustLevel.String), TrustReason: trustReason.String,
+		TrustedAt: parseTime(trustedAt.String), FeedbackScore: feedbackScore,
 		Kind: kind.String, Status: Status(status.String), Text: text.String,
 		Title: title.String, Summary: summary.String, CanonicalID: canonicalID.String,
 		SupersededBy: supersededBy.String, Archived: archived != 0,
@@ -1154,7 +1190,7 @@ WHERE id = ? AND `+scopePredicate+` AND revision = ? AND status = ?
 	if err != nil {
 		return Record{}, err
 	}
-	if err := appendCurrentRecordVersionTx(ctx, tx, record.ID, record.ProjectKey,
+	if err := s.appendCurrentRecordVersionTx(ctx, tx, record.ID, record.ProjectKey,
 		"user", "manual patch", "update", eventID); err != nil {
 		return Record{}, err
 	}
@@ -1236,7 +1272,7 @@ func (s *Store) markConflictReview(
 		}
 		seenPairs[key] = struct{}{}
 
-		preferred, err := loadRecordTx(ctx, tx, pair.PreferredID, s.cfg.ProjectKey)
+		preferred, err := loadRecordTx(ctx, tx, pair.PreferredID, s.tenantID(), s.cfg.ProjectKey)
 		if err != nil {
 			return err
 		}
@@ -1245,7 +1281,7 @@ func (s *Store) markConflictReview(
 		}
 		var competing *Record
 		if pair.CompetingID != "" {
-			record, err := loadRecordTx(ctx, tx, pair.CompetingID, s.cfg.ProjectKey)
+			record, err := loadRecordTx(ctx, tx, pair.CompetingID, s.tenantID(), s.cfg.ProjectKey)
 			if err != nil {
 				return err
 			}
@@ -1345,7 +1381,7 @@ INSERT OR IGNORE INTO memory_suppressions (
 	if err != nil {
 		return err
 	}
-	if err := appendCurrentRecordVersionTx(ctx, tx, record.ID, record.ProjectKey,
+	if err := s.appendCurrentRecordVersionTx(ctx, tx, record.ID, record.ProjectKey,
 		"user", "manual delete", "delete", eventID); err != nil {
 		return err
 	}
@@ -1443,7 +1479,11 @@ func (s *Store) Status(ctx context.Context) (StatusReport, error) {
 	var version int
 	_ = db.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&version)
 	report.SchemaVersion = version
-	rows, err := db.QueryContext(ctx, `SELECT status, COUNT(1) FROM memory_entries WHERE project_key = ? GROUP BY status`, s.cfg.ProjectKey)
+	rows, err := db.QueryContext(ctx, `
+SELECT status, COUNT(1) FROM memory_entries
+WHERE tenant_id = ? AND project_key = ?
+GROUP BY status
+`, s.tenantID(), s.cfg.ProjectKey)
 	if err == nil {
 		for rows.Next() {
 			var status string
@@ -1457,9 +1497,13 @@ func (s *Store) Status(ctx context.Context) (StatusReport, error) {
 	}
 	_ = db.QueryRowContext(ctx, `
 SELECT COUNT(1) FROM memory_entries
-WHERE project_key = ? AND source_kind = 'manual'
-`, s.cfg.ProjectKey).Scan(&report.ManualCount)
-	rows, err = db.QueryContext(ctx, `SELECT freshness_status, COUNT(1) FROM memory_entries WHERE project_key = ? GROUP BY freshness_status`, s.cfg.ProjectKey)
+WHERE tenant_id = ? AND project_key = ? AND source_kind = 'manual'
+`, s.tenantID(), s.cfg.ProjectKey).Scan(&report.ManualCount)
+	rows, err = db.QueryContext(ctx, `
+SELECT freshness_status, COUNT(1) FROM memory_entries
+WHERE tenant_id = ? AND project_key = ?
+GROUP BY freshness_status
+`, s.tenantID(), s.cfg.ProjectKey)
 	if err == nil {
 		for rows.Next() {
 			var freshness string
@@ -1474,8 +1518,9 @@ WHERE project_key = ? AND source_kind = 'manual'
 	var summaryStatus, summaryFreshness string
 	err = db.QueryRowContext(ctx, `
 SELECT revision, status, freshness_status FROM memory_summaries
-WHERE project_key = ? AND status = 'active' ORDER BY revision DESC LIMIT 1
-`, s.cfg.ProjectKey).Scan(&summaryRevision, &summaryStatus, &summaryFreshness)
+WHERE tenant_id = ? AND project_key = ? AND scope_kind = 'project' AND scope_key = ?
+  AND status = 'active' ORDER BY revision DESC LIMIT 1
+`, s.tenantID(), s.cfg.ProjectKey, s.cfg.ProjectKey).Scan(&summaryRevision, &summaryStatus, &summaryFreshness)
 	if err == nil {
 		report.SummaryRevision = summaryRevision
 		report.SummaryStatus = summaryStatus
@@ -1483,10 +1528,10 @@ WHERE project_key = ? AND status = 'active' ORDER BY revision DESC LIMIT 1
 	}
 	_ = db.QueryRowContext(ctx, `
 SELECT COUNT(1) FROM memory_entries
-WHERE project_key = ? AND status = 'active' AND pinned = 1
-`, s.cfg.ProjectKey).Scan(&report.PinnedCount)
+WHERE tenant_id = ? AND project_key = ? AND status = 'active' AND pinned = 1
+`, s.tenantID(), s.cfg.ProjectKey).Scan(&report.PinnedCount)
 	report.InjectionMode = s.cfg.InjectionMode
-	rows, err = db.QueryContext(ctx, `SELECT kind, status, COUNT(1) FROM memory_jobs WHERE project_key = ? GROUP BY kind, status`, s.cfg.ProjectKey)
+	rows, err = db.QueryContext(ctx, `SELECT kind, status, COUNT(1) FROM memory_jobs WHERE tenant_id = ? AND project_key = ? GROUP BY kind, status`, s.tenantID(), s.cfg.ProjectKey)
 	if err == nil {
 		for rows.Next() {
 			var kind, status string
@@ -1503,11 +1548,11 @@ WHERE project_key = ? AND status = 'active' AND pinned = 1
 	}
 	_ = db.QueryRowContext(ctx, `
 SELECT COUNT(1) FROM memory_jobs
-WHERE project_key = ?
+WHERE tenant_id = ? AND project_key = ?
   AND COALESCE(deadline_at, '') = ''
   AND status NOT IN ('succeeded', 'cancelled', 'dead_letter')
-`, s.cfg.ProjectKey).Scan(&report.MissingDeadlineJobs)
-	rows, err = db.QueryContext(ctx, `SELECT status, COUNT(1) FROM memory_turn_digests WHERE project_key = ? GROUP BY status`, s.cfg.ProjectKey)
+`, s.tenantID(), s.cfg.ProjectKey).Scan(&report.MissingDeadlineJobs)
+	rows, err = db.QueryContext(ctx, `SELECT status, COUNT(1) FROM memory_turn_digests WHERE tenant_id = ? AND project_key = ? GROUP BY status`, s.tenantID(), s.cfg.ProjectKey)
 	if err == nil {
 		for rows.Next() {
 			var status string
@@ -1518,7 +1563,7 @@ WHERE project_key = ?
 		}
 		_ = rows.Close()
 	}
-	rows, err = db.QueryContext(ctx, `SELECT status, COUNT(1) FROM memory_turn_windows WHERE project_key = ? GROUP BY status`, s.cfg.ProjectKey)
+	rows, err = db.QueryContext(ctx, `SELECT status, COUNT(1) FROM memory_turn_windows WHERE tenant_id = ? AND project_key = ? GROUP BY status`, s.tenantID(), s.cfg.ProjectKey)
 	if err == nil {
 		for rows.Next() {
 			var status string
@@ -1534,8 +1579,8 @@ WHERE project_key = ?
 	_ = db.QueryRowContext(ctx, `
 SELECT COUNT(1), COUNT(DISTINCT session_id), COALESCE(MIN(created_at), '')
 FROM memory_turn_digests
-WHERE project_key = ? AND status = 'pending'
-	`, s.cfg.ProjectKey).Scan(&pendingDigests, &pendingDigestSessions, &oldestPending)
+WHERE tenant_id = ? AND project_key = ? AND status = 'pending'
+	`, s.tenantID(), s.cfg.ProjectKey).Scan(&pendingDigests, &pendingDigestSessions, &oldestPending)
 	report.PendingDigestSessions = pendingDigestSessions
 	batchSize := s.cfg.TurnDigestBatchSize
 	if batchSize <= 0 {
@@ -1563,8 +1608,8 @@ SELECT status, COALESCE(session_id, ''), COALESCE(created_at, ''),
        COALESCE(retry_at, ''), COALESCE(dead_letter_at, ''),
        COALESCE(finished_at, '')
 FROM memory_jobs
-WHERE project_key = ? AND (kind = 'phase1_extract' OR kind = 'phase1_extract/v2')
-`, s.cfg.ProjectKey)
+WHERE tenant_id = ? AND project_key = ? AND (kind = 'phase1_extract' OR kind = 'phase1_extract/v2')
+`, s.tenantID(), s.cfg.ProjectKey)
 	if err == nil {
 		for rows.Next() {
 			var status, sessionID, createdAt, retryAt, deadLetterAt, finishedAt string
@@ -1621,9 +1666,9 @@ SELECT kind, id, job_key, COALESCE(session_id, ''), status, priority, attempt,
        COALESCE(dead_letter_at, ''), COALESCE(dead_letter_reason, ''),
        COALESCE(last_error, '')
 FROM memory_jobs
-WHERE project_key = ? AND (kind = 'phase1_extract' OR kind = 'phase1_extract/v2')
+WHERE tenant_id = ? AND project_key = ? AND (kind = 'phase1_extract' OR kind = 'phase1_extract/v2')
 ORDER BY created_at DESC LIMIT 20
-`, s.cfg.ProjectKey)
+`, s.tenantID(), s.cfg.ProjectKey)
 	if err == nil {
 		defer rows.Close()
 		for rows.Next() {
@@ -1650,8 +1695,8 @@ func (s *Store) ListRecallTraces(ctx context.Context, sessionID string, limit in
 	if limit > 200 {
 		limit = 200
 	}
-	args := []interface{}{s.cfg.ProjectKey}
-	where := []string{"project_key = ?"}
+	args := []interface{}{s.tenantID(), s.cfg.ProjectKey}
+	where := []string{"tenant_id = ?", "project_key = ?"}
 	if strings.TrimSpace(sessionID) != "" {
 		where = append(where, "session_id = ?")
 		args = append(args, strings.TrimSpace(sessionID))

@@ -131,11 +131,13 @@ func TestLiveModelMemoryPipeline(t *testing.T) {
 	require.Positive(t, consolidated.Promoted)
 	require.Zero(t, consolidated.Superseded, "independent entities must not overwrite each other")
 	require.NotEmpty(t, consolidated.SummaryID)
-	require.Equal(t, audit.model, consolidated.SummaryModel)
 	summary, err := store.ActiveSummary(ctx)
 	require.NoError(t, err)
 	require.NotNil(t, summary)
-	require.Equal(t, "llm_v1", summary.Metadata["compiler"], "deterministic fallback does not count as a live summary pass")
+	require.Equal(t, audit.model, consolidated.SummaryModel,
+		"summary must use the live model; fallback_reason=%v", summary.Metadata["fallback_reason"])
+	require.Equal(t, "llm_v1", summary.Metadata["compiler"],
+		"deterministic fallback does not count as a live summary pass; fallback_reason=%v", summary.Metadata["fallback_reason"])
 	require.NotContains(t, summary.Metadata, "fallback_reason")
 	require.Contains(t, summary.Text, "C++")
 	require.Contains(t, summary.Text, "C#")

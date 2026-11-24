@@ -89,6 +89,9 @@ func TestBuildFromRuntimeConfigWiresMemoryStageProviders(t *testing.T) {
 	cfg.Memory.Generation.Model = "extract-model"
 	cfg.Memory.Consolidation.Provider = "summary-provider"
 	cfg.Memory.Consolidation.Model = "summary-model"
+	cfg.Memory.Dreaming.Provider = "dream-provider"
+	cfg.Memory.Dreaming.Model = "dream-model"
+	cfg.Memory.Dreaming.ReasoningEffort = "medium"
 
 	manager := runtimechat.NewSessionManager(runtimechat.NewInMemoryStorage(), nil)
 	defer manager.Stop()
@@ -125,6 +128,12 @@ func TestBuildFromRuntimeConfigWiresMemoryStageProviders(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, "summary-provider", projectSummarizer.Config.ConsolidationProvider)
 	require.Equal(t, "summary-model", projectSummarizer.Config.ConsolidationModel)
+
+	dreamAnalyzer, ok := rt.DreamAnalyzer.(*memoryruntime.LLMDreamAnalyzer)
+	require.True(t, ok)
+	require.Equal(t, "dream-provider", dreamAnalyzer.Config.DreamingProvider)
+	require.Equal(t, "dream-model", dreamAnalyzer.Config.DreamingModel)
+	require.Equal(t, "medium", dreamAnalyzer.Config.DreamingReasoningEffort)
 }
 
 func TestBuildFromRuntimeConfigConsolidationProviderFallsBackToExtraction(t *testing.T) {

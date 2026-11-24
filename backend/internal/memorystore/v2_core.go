@@ -178,7 +178,7 @@ func truncateCoreToBudget(text string, budget int) string {
 	return strings.TrimSpace(string(runes[:low])) + "…"
 }
 
-func validateCoreSourcesTx(ctx context.Context, tx *sql.Tx, projectKey string, sourceIDs []string) error {
+func validateCoreSourcesTx(ctx context.Context, tx *sql.Tx, tenantID, projectKey string, sourceIDs []string) error {
 	for _, sourceID := range sourceIDs {
 		var status, sensitivity, text, freshness string
 		var archived int
@@ -186,8 +186,8 @@ func validateCoreSourcesTx(ctx context.Context, tx *sql.Tx, projectKey string, s
 		err := tx.QueryRowContext(ctx, `
 SELECT status, sensitivity, text, archived, freshness_status, valid_until, deleted_at
 FROM memory_entries
-WHERE id = ? AND project_key = ? AND scope = ?
-`, sourceID, projectKey, string(ScopeProject)).Scan(
+WHERE id = ? AND tenant_id = ? AND project_key = ? AND scope = ?
+`, sourceID, tenantID, projectKey, string(ScopeProject)).Scan(
 			&status, &sensitivity, &text, &archived, &freshness, &validUntil, &deletedAt,
 		)
 		if err == sql.ErrNoRows {
@@ -290,7 +290,7 @@ func (s *Store) CreateCoreCandidateForWorker(
 	if err := validateMaintenanceLeaseTx(ctx, tx, s.cfg.ProjectKey); err != nil {
 		return CoreMemory{}, err
 	}
-	if err := checkJobPurgeFenceByIDTx(ctx, tx, job.ID, s.cfg.ProjectKey); err != nil {
+	if err := checkJobPurgeFenceByIDTx(ctx, tx, s.tenantID(), job.ID, s.cfg.ProjectKey); err != nil {
 		return CoreMemory{}, err
 	}
 	now := time.Now().UTC()
@@ -298,10 +298,10 @@ func (s *Store) CreateCoreCandidateForWorker(
 	var owned int
 	if err := tx.QueryRowContext(ctx, `
 SELECT COUNT(1) FROM memory_jobs
-WHERE id = ? AND project_key = ? AND kind = 'core_rebuild'
+WHERE id = ? AND tenant_id = ? AND project_key = ? AND kind = 'core_rebuild'
   AND status = 'running' AND worker_id = ? AND attempt = ?
   AND COALESCE(lease_until, '') > ? AND COALESCE(deadline_at, '') > ?
-`, job.ID, s.cfg.ProjectKey, strings.TrimSpace(job.WorkerID), job.Attempt, nowText, nowText).Scan(&owned); err != nil {
+`, job.ID, s.tenantID(), s.cfg.ProjectKey, strings.TrimSpace(job.WorkerID), job.Attempt, nowText, nowText).Scan(&owned); err != nil {
 		return CoreMemory{}, fmt.Errorf("memorystore: validate core rebuild lease: %w", err)
 	}
 	if owned != 1 {
@@ -317,11 +317,11 @@ UPDATE memory_jobs
 SET status = 'succeeded', worker_id = NULL, lease_until = NULL,
     deadline_at = NULL, heartbeat_at = NULL, finished_at = ?,
     last_success_watermark = ?, updated_at = ?
-WHERE id = ? AND project_key = ? AND kind = 'core_rebuild'
+WHERE id = ? AND tenant_id = ? AND project_key = ? AND kind = 'core_rebuild'
   AND status = 'running' AND worker_id = ? AND attempt = ?
   AND COALESCE(lease_until, '') > ? AND COALESCE(deadline_at, '') > ?
 `, nowText, nullableString(watermark), nowText,
-		job.ID, s.cfg.ProjectKey, strings.TrimSpace(job.WorkerID), job.Attempt, nowText, nowText)
+		job.ID, s.tenantID(), s.cfg.ProjectKey, strings.TrimSpace(job.WorkerID), job.Attempt, nowText, nowText)
 	if err != nil {
 		return CoreMemory{}, fmt.Errorf("memorystore: complete core rebuild job: %w", err)
 	}
@@ -339,15 +339,15 @@ func (s *Store) createCoreCandidateTx(
 	tx *sql.Tx,
 	opts CoreMemoryCandidateOptions,
 ) (CoreMemory, error) {
-	if err := validateCoreSourcesTx(ctx, tx, s.cfg.ProjectKey, opts.SourceIDs); err != nil {
+	if err := validateCoreSourcesTx(ctx, tx, s.tenantID(), s.cfg.ProjectKey, opts.SourceIDs); err != nil {
 		return CoreMemory{}, err
 	}
 	var version int64
 	if err := tx.QueryRowContext(ctx, `
 SELECT COALESCE(MAX(version), 0) + 1
 FROM memory_core
-WHERE project_key = ? AND scope_kind = ? AND scope_key = ?
-`, s.cfg.ProjectKey, string(opts.ScopeKind), opts.ScopeKey).Scan(&version); err != nil {
+WHERE tenant_id = ? AND project_key = ? AND scope_kind = ? AND scope_key = ?
+`, s.tenantID(), s.cfg.ProjectKey, string(opts.ScopeKind), opts.ScopeKey).Scan(&version); err != nil {
 		return CoreMemory{}, fmt.Errorf("memorystore: allocate core version: %w", err)
 	}
 	sourceJSON, _ := json.Marshal(opts.SourceIDs)
@@ -361,10 +361,10 @@ WHERE project_key = ? AND scope_kind = ? AND scope_key = ?
 	}
 	_, err := tx.ExecContext(ctx, `
 INSERT INTO memory_core (
-    id, project_key, scope_kind, scope_key, content, version, token_estimate,
+    id, tenant_id, project_key, scope_kind, scope_key, content, version, token_estimate,
     status, source_ids_json, generated_by, approved_by, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?)
-`, core.ID, core.ProjectKey, string(core.ScopeKind), core.ScopeKey, core.Content,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?)
+`, core.ID, s.tenantID(), core.ProjectKey, string(core.ScopeKind), core.ScopeKey, core.Content,
 		core.Version, core.TokenEstimate, core.Status, string(sourceJSON),
 		core.GeneratedBy, now, now)
 	if err != nil {
@@ -401,7 +401,7 @@ func (s *Store) GetActiveCore(ctx context.Context, scopeKind Scope, scopeKey str
 		return CoreMemory{}, fmt.Errorf("memorystore: begin active core source validation: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	if err := validateCoreSourcesTx(ctx, tx, s.cfg.ProjectKey, core.SourceIDs); err != nil {
+	if err := validateCoreSourcesTx(ctx, tx, s.tenantID(), s.cfg.ProjectKey, core.SourceIDs); err != nil {
 		return CoreMemory{}, fmt.Errorf("%w: %v", ErrCoreSourceIneligible, err)
 	}
 	// Rollback (via the deferred call above) is the correct finish for this
@@ -430,10 +430,10 @@ func (s *Store) getCore(ctx context.Context, scopeKind Scope, scopeKey, status s
 SELECT id, project_key, scope_kind, scope_key, content, version, token_estimate,
        status, source_ids_json, generated_by, approved_by, created_at, updated_at
 FROM memory_core
-WHERE project_key = ? AND scope_kind = ? AND scope_key = ? AND status = ?
+WHERE tenant_id = ? AND project_key = ? AND scope_kind = ? AND scope_key = ? AND status = ?
 ORDER BY version DESC
 LIMIT 1
-`, s.cfg.ProjectKey, string(scopeKind), scopeKey, status))
+`, s.tenantID(), s.cfg.ProjectKey, string(scopeKind), scopeKey, status))
 }
 
 // ListCore returns bounded core history for the current project. An empty
@@ -471,10 +471,10 @@ func (s *Store) ListCore(ctx context.Context, filter CoreMemoryFilter) ([]CoreMe
 SELECT id, project_key, scope_kind, scope_key, content, version, token_estimate,
        status, source_ids_json, generated_by, approved_by, created_at, updated_at
 FROM memory_core
-WHERE project_key = ? AND scope_kind = ? AND scope_key = ? AND status = ?
+WHERE tenant_id = ? AND project_key = ? AND scope_kind = ? AND scope_key = ? AND status = ?
 ORDER BY version DESC
 LIMIT ?
-`, s.cfg.ProjectKey, string(scopeKind), scopeKey, status, limit)
+`, s.tenantID(), s.cfg.ProjectKey, string(scopeKind), scopeKey, status, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -521,13 +521,13 @@ func (s *Store) ActivateCore(ctx context.Context, id, approvedBy string) (CoreMe
 SELECT id, project_key, scope_kind, scope_key, content, version, token_estimate,
        status, source_ids_json, generated_by, approved_by, created_at, updated_at
 FROM memory_core
-WHERE id = ? AND project_key = ?
-`, id, s.cfg.ProjectKey))
+WHERE id = ? AND tenant_id = ? AND project_key = ?
+`, id, s.tenantID(), s.cfg.ProjectKey))
 	if err != nil {
 		return CoreMemory{}, err
 	}
 	if core.Status == CoreStatusActive {
-		if err := validateCoreSourcesTx(ctx, tx, s.cfg.ProjectKey, core.SourceIDs); err != nil {
+		if err := validateCoreSourcesTx(ctx, tx, s.tenantID(), s.cfg.ProjectKey, core.SourceIDs); err != nil {
 			return CoreMemory{}, fmt.Errorf("%w: %v", ErrCoreSourceIneligible, err)
 		}
 		if err := tx.Commit(); err != nil {
@@ -538,22 +538,22 @@ WHERE id = ? AND project_key = ?
 	if core.Status != CoreStatusCandidate {
 		return CoreMemory{}, ErrCoreNotCandidate
 	}
-	if err := validateCoreSourcesTx(ctx, tx, s.cfg.ProjectKey, core.SourceIDs); err != nil {
+	if err := validateCoreSourcesTx(ctx, tx, s.tenantID(), s.cfg.ProjectKey, core.SourceIDs); err != nil {
 		return CoreMemory{}, fmt.Errorf("%w: %v", ErrCoreSourceIneligible, err)
 	}
 	now := nowText()
 	if _, err := tx.ExecContext(ctx, `
 UPDATE memory_core
 SET status = ?, updated_at = ?
-WHERE project_key = ? AND scope_kind = ? AND scope_key = ? AND status = ?
-`, CoreStatusStale, now, s.cfg.ProjectKey, string(core.ScopeKind), core.ScopeKey, CoreStatusActive); err != nil {
+WHERE tenant_id = ? AND project_key = ? AND scope_kind = ? AND scope_key = ? AND status = ?
+`, CoreStatusStale, now, s.tenantID(), s.cfg.ProjectKey, string(core.ScopeKind), core.ScopeKey, CoreStatusActive); err != nil {
 		return CoreMemory{}, fmt.Errorf("memorystore: stale previous core: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `
 UPDATE memory_core
 SET status = ?, approved_by = ?, updated_at = ?
-WHERE id = ? AND project_key = ? AND status = ?
-`, CoreStatusActive, approvedBy, now, id, s.cfg.ProjectKey, CoreStatusCandidate); err != nil {
+WHERE id = ? AND tenant_id = ? AND project_key = ? AND status = ?
+`, CoreStatusActive, approvedBy, now, id, s.tenantID(), s.cfg.ProjectKey, CoreStatusCandidate); err != nil {
 		return CoreMemory{}, fmt.Errorf("memorystore: activate core: %w", err)
 	}
 	if err := insertEventTx(ctx, tx, s.cfg.ProjectKey, id, "core_activated",
@@ -606,8 +606,8 @@ func (s *Store) ArchiveCore(ctx context.Context, id, actor, reason string) error
 SELECT id, project_key, scope_kind, scope_key, content, version, token_estimate,
        status, source_ids_json, generated_by, approved_by, created_at, updated_at
 FROM memory_core
-WHERE id = ? AND project_key = ?
-`, id, s.cfg.ProjectKey))
+WHERE id = ? AND tenant_id = ? AND project_key = ?
+`, id, s.tenantID(), s.cfg.ProjectKey))
 	if err != nil {
 		return err
 	}
@@ -617,8 +617,8 @@ WHERE id = ? AND project_key = ?
 	now := nowText()
 	if _, err := tx.ExecContext(ctx, `
 UPDATE memory_core SET status = ?, updated_at = ?
-WHERE id = ? AND project_key = ?
-`, CoreStatusArchived, now, id, s.cfg.ProjectKey); err != nil {
+WHERE id = ? AND tenant_id = ? AND project_key = ?
+`, CoreStatusArchived, now, id, s.tenantID(), s.cfg.ProjectKey); err != nil {
 		return err
 	}
 	return func() error {

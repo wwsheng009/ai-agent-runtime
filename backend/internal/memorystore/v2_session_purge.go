@@ -23,7 +23,7 @@ var ErrSessionPurgeGenerationMismatch = errors.New("memory session purge generat
 func checkSessionPurgeGenerationTx(
 	ctx context.Context,
 	tx *sql.Tx,
-	projectKey, sessionID string,
+	tenantID, projectKey, sessionID string,
 	generation int64,
 ) error {
 	var state string
@@ -31,8 +31,8 @@ func checkSessionPurgeGenerationTx(
 	err := tx.QueryRowContext(ctx, `
 		SELECT state, COALESCE(fenced_session_generation, generation)
 		FROM memory_session_purges
-		WHERE project_key = ? AND session_id = ?
-	`, projectKey, sessionID).Scan(&state, &fencedGeneration)
+		WHERE tenant_id = ? AND project_key = ? AND session_id = ?
+	`, strings.TrimSpace(tenantID), projectKey, sessionID).Scan(&state, &fencedGeneration)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
@@ -71,6 +71,7 @@ func (s *Store) PurgeSessionWithGenerations(
 	}
 	sessionID = strings.TrimSpace(sessionID)
 	projectKey := strings.TrimSpace(s.cfg.ProjectKey)
+	tenantID := s.tenantID()
 	if sessionID == "" || projectKey == "" || sessionGeneration <= 0 || purgeGeneration <= 0 {
 		return 0, fmt.Errorf("%w: session, project and positive generation are required",
 			ErrSessionPurgeGenerationMismatch)
@@ -93,8 +94,8 @@ func (s *Store) PurgeSessionWithGenerations(
 		       COALESCE(purge_generation, generation),
 		       state
 		FROM memory_session_purges
-		WHERE project_key = ? AND session_id = ?
-	`, projectKey, sessionID).Scan(&storedFence, &storedPurge, &storedState)
+		WHERE tenant_id = ? AND project_key = ? AND session_id = ?
+	`, tenantID, projectKey, sessionID).Scan(&storedFence, &storedPurge, &storedState)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return 0, fmt.Errorf("memorystore: read session purge generation: %w", err)
 	}
@@ -111,8 +112,8 @@ func (s *Store) PurgeSessionWithGenerations(
 			if _, err := tx.ExecContext(ctx, `
 				UPDATE memory_session_purges
 				SET purge_generation = ?, updated_at = ?
-				WHERE project_key = ? AND session_id = ?
-			`, purgeGeneration, now, projectKey, sessionID); err != nil {
+				WHERE tenant_id = ? AND project_key = ? AND session_id = ?
+			`, purgeGeneration, now, tenantID, projectKey, sessionID); err != nil {
 				return 0, fmt.Errorf("memorystore: advance completed session purge generation: %w", err)
 			}
 		}
@@ -126,10 +127,10 @@ func (s *Store) PurgeSessionWithGenerations(
 	}
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO memory_session_purges(
-			project_key, session_id, generation, fenced_session_generation,
+			tenant_id, project_key, session_id, generation, fenced_session_generation,
 			purge_generation, state, reason, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, 'purged', 'canonical_session_delete', ?, ?)
-		ON CONFLICT(project_key, session_id) DO UPDATE SET
+		) VALUES (?, ?, ?, ?, ?, ?, 'purged', 'canonical_session_delete', ?, ?)
+		ON CONFLICT(tenant_id, project_key, session_id) DO UPDATE SET
 			generation = CASE
 				WHEN excluded.fenced_session_generation > memory_session_purges.fenced_session_generation
 				THEN excluded.fenced_session_generation ELSE memory_session_purges.generation END,
@@ -141,7 +142,7 @@ func (s *Store) PurgeSessionWithGenerations(
 				THEN excluded.purge_generation ELSE memory_session_purges.purge_generation END,
 			state = 'purged',
 			updated_at = excluded.updated_at
-	`, projectKey, sessionID, sessionGeneration, sessionGeneration, purgeGeneration, now, now)
+	`, tenantID, projectKey, sessionID, sessionGeneration, sessionGeneration, purgeGeneration, now, now)
 	if err != nil {
 		return 0, fmt.Errorf("memorystore: write session purge fence: %w", err)
 	}
@@ -160,69 +161,70 @@ func (s *Store) PurgeSessionWithGenerations(
 		// instead of waiting for a later gated read to discover missing items.
 		{`UPDATE memory_summaries
 		  SET freshness_status = 'stale'
-		  WHERE project_key = ? AND status = 'active'
+		  WHERE tenant_id = ? AND project_key = ? AND status = 'active'
 		    AND id IN (
 		      SELECT DISTINCT i.summary_id
 		      FROM memory_summary_items i
 		      JOIN memory_entries e ON e.id = i.memory_id
-		      WHERE e.project_key = ? AND e.source_session_id = ?
+		      WHERE e.tenant_id = ? AND e.project_key = ? AND e.source_session_id = ?
 		        AND e.source_session_generation = ?
-		    )`, []interface{}{projectKey, projectKey, sessionID, sessionGeneration}},
+		    )`, []interface{}{tenantID, projectKey, tenantID, projectKey, sessionID, sessionGeneration}},
 		{`DELETE FROM memory_summary_items
 		  WHERE memory_id IN (
 		    SELECT id FROM memory_entries
-		    WHERE project_key = ? AND source_session_id = ?
+		    WHERE tenant_id = ? AND project_key = ? AND source_session_id = ?
 		      AND source_session_generation = ?
-		  )`, []interface{}{projectKey, sessionID, sessionGeneration}},
+		  )`, []interface{}{tenantID, projectKey, sessionID, sessionGeneration}},
 		{`DELETE FROM memory_sources
 		  WHERE memory_id IN (
 		    SELECT id FROM memory_entries
-		    WHERE project_key = ? AND source_session_id = ?
+		    WHERE tenant_id = ? AND project_key = ? AND source_session_id = ?
 		      AND source_session_generation = ?
 		  )`, []interface{}{
-			projectKey, sessionID, sessionGeneration,
+			tenantID, projectKey, sessionID, sessionGeneration,
 		}},
 		{`DELETE FROM memory_events
-		  WHERE project_key = ? AND memory_id IN (
+		  WHERE tenant_id = ? AND project_key = ? AND memory_id IN (
 		    SELECT id FROM memory_entries
-		    WHERE project_key = ? AND source_session_id = ?
+		    WHERE tenant_id = ? AND project_key = ? AND source_session_id = ?
 		      AND source_session_generation = ?
 		  )`, []interface{}{
-			projectKey, projectKey, sessionID, sessionGeneration,
+			tenantID, projectKey, tenantID, projectKey, sessionID, sessionGeneration,
 		}},
 		{`DELETE FROM memory_usage
-		  WHERE project_key = ? AND memory_id IN (
+		  WHERE tenant_id = ? AND project_key = ? AND memory_id IN (
 		    SELECT id FROM memory_entries
-		    WHERE project_key = ? AND source_session_id = ?
+		    WHERE tenant_id = ? AND project_key = ? AND source_session_id = ?
 		      AND source_session_generation = ?
 		  )`, []interface{}{
-			projectKey, projectKey, sessionID, sessionGeneration,
+			tenantID, projectKey, tenantID, projectKey, sessionID, sessionGeneration,
 		}},
 		// Recall traces and session modes predate incarnation identity. Keep
 		// them until their schema carries a generation; matching only the
 		// reusable session ID could erase state from a later incarnation.
 		{`DELETE FROM memory_turn_output_receipts
-		  WHERE project_key = ? AND session_id = ?
+		  WHERE tenant_id = ? AND project_key = ? AND session_id = ?
 		    AND EXISTS (
 		      SELECT 1 FROM memory_turn_capture_generations g
-		      WHERE g.project_key = memory_turn_output_receipts.project_key
+		      WHERE g.tenant_id = memory_turn_output_receipts.tenant_id
+		        AND g.project_key = memory_turn_output_receipts.project_key
 		        AND g.capture_receipt_id = memory_turn_output_receipts.capture_receipt_id
 		        AND g.generation = ?
-		    )`, []interface{}{projectKey, sessionID, sessionGeneration}},
+		    )`, []interface{}{tenantID, projectKey, sessionID, sessionGeneration}},
 		{`DELETE FROM memory_turn_capture_generations
-		  WHERE project_key = ? AND session_id = ? AND generation = ?`,
-			[]interface{}{projectKey, sessionID, sessionGeneration}},
+		  WHERE tenant_id = ? AND project_key = ? AND session_id = ? AND generation = ?`,
+			[]interface{}{tenantID, projectKey, sessionID, sessionGeneration}},
 		{`DELETE FROM memory_turn_windows
-		  WHERE project_key = ? AND session_id = ?
-		    AND session_generation = ?`, []interface{}{projectKey, sessionID, sessionGeneration}},
+		  WHERE tenant_id = ? AND project_key = ? AND session_id = ?
+		    AND session_generation = ?`, []interface{}{tenantID, projectKey, sessionID, sessionGeneration}},
 		{`DELETE FROM memory_turn_digests
-		  WHERE project_key = ? AND session_id = ? AND session_generation = ?`,
-			[]interface{}{projectKey, sessionID, sessionGeneration}},
+		  WHERE tenant_id = ? AND project_key = ? AND session_id = ? AND session_generation = ?`,
+			[]interface{}{tenantID, projectKey, sessionID, sessionGeneration}},
 		// Jobs with a generation can be deleted exactly. Legacy jobs whose
 		// identity exists only in job_key remain quarantined by the claim fence:
 		// without a generation, a prefix match cannot distinguish incarnations.
 		{`DELETE FROM memory_jobs
-		  WHERE project_key = ?
+		  WHERE tenant_id = ? AND project_key = ?
 		    AND (
 		      (
 		        kind = 'phase1_extract/v2' AND session_id = ?
@@ -235,7 +237,7 @@ func (s *Store) PurgeSessionWithGenerations(
 		        )
 		      )
 		    )`, []interface{}{
-			projectKey,
+			tenantID, projectKey,
 			sessionID, sessionGeneration,
 			sessionGeneration,
 			"session:" + sessionID + ":", "session:" + sessionID + ":",
@@ -243,21 +245,21 @@ func (s *Store) PurgeSessionWithGenerations(
 			"project:" + projectKey + ":session:" + sessionID + ":",
 		}},
 		{`DELETE FROM memory_entries
-		  WHERE project_key = ? AND source_session_id = ?
+		  WHERE tenant_id = ? AND project_key = ? AND source_session_id = ?
 		    AND source_session_generation = ?`,
-			[]interface{}{projectKey, sessionID, sessionGeneration}},
+			[]interface{}{tenantID, projectKey, sessionID, sessionGeneration}},
 	}
-	if err := enqueueSessionPurgeSummaryRebuilds(ctx, tx, projectKey, sessionID, sessionGeneration); err != nil {
+	if err := enqueueSessionPurgeSummaryRebuilds(ctx, tx, s.tenantID(), projectKey, sessionID, sessionGeneration); err != nil {
 		return 0, fmt.Errorf("memorystore: enqueue session summary rebuild: %w", err)
 	}
 	if err := purgeRecordVersionsTx(ctx, tx, projectKey, `
 DELETE FROM memory_versions
-WHERE project_key = ? AND memory_id IN (
+WHERE tenant_id = ? AND project_key = ? AND memory_id IN (
   SELECT id FROM memory_entries
-  WHERE project_key = ? AND source_session_id = ?
+  WHERE tenant_id = ? AND project_key = ? AND source_session_id = ?
     AND source_session_generation = ?
 )
-`, projectKey, projectKey, sessionID, sessionGeneration); err != nil {
+`, tenantID, projectKey, tenantID, projectKey, sessionID, sessionGeneration); err != nil {
 		return 0, fmt.Errorf("memorystore: purge session versions: %w", err)
 	}
 	var deleted int64
@@ -282,6 +284,7 @@ WHERE project_key = ? AND memory_id IN (
 func enqueueSessionPurgeSummaryRebuilds(
 	ctx context.Context,
 	tx *sql.Tx,
+	tenantID string,
 	projectKey, sessionID string,
 	sessionGeneration int64,
 ) error {
@@ -290,10 +293,10 @@ SELECT DISTINCT s.id, COALESCE(s.input_watermark, ''), s.scope
 FROM memory_summaries s
 JOIN memory_summary_items i ON i.summary_id = s.id
 JOIN memory_entries e ON e.id = i.memory_id
-WHERE s.project_key = ? AND s.status = 'active'
-  AND e.project_key = ? AND e.source_session_id = ?
+WHERE s.tenant_id = ? AND s.project_key = ? AND s.status = 'active'
+  AND e.tenant_id = ? AND e.project_key = ? AND e.source_session_id = ?
   AND e.source_session_generation = ?
-`, projectKey, projectKey, sessionID, sessionGeneration)
+`, tenantID, projectKey, tenantID, projectKey, sessionID, sessionGeneration)
 	if err != nil {
 		return err
 	}
@@ -313,7 +316,7 @@ WHERE s.project_key = ? AND s.status = 'active'
 		return err
 	}
 	for _, summary := range summaries {
-		if _, err := enqueueSummaryRebuild(ctx, tx,
+		if _, err := enqueueSummaryRebuild(ctx, tx, tenantID,
 			summary.id+":"+summary.watermark, summary.scope, projectKey, summary.watermark); err != nil {
 			return err
 		}

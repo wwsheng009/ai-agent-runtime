@@ -107,6 +107,14 @@ func (t *memoryTool) Execute(ctx context.Context, params map[string]interface{})
 		return memoryToolJSON(report), nil
 	case "core_get":
 		return t.coreGet(ctx, store)
+	case "episodes":
+		return t.episodes(ctx, store, params)
+	case "patches":
+		return t.patches(ctx, store, params)
+	case "patch_read":
+		return t.patchRead(ctx, store, params)
+	case "dreams":
+		return t.dreams(ctx, store, params)
 	case "add":
 		return t.add(ctx, store, params)
 	case "pin":
@@ -123,9 +131,30 @@ func (t *memoryTool) Execute(ctx context.Context, params map[string]interface{})
 		return t.history(ctx, store, params)
 	case "rollback":
 		return t.rollback(ctx, store, params)
+	case "feedback":
+		return t.feedback(ctx, store, params)
 	default:
 		return memoryToolError(fmt.Errorf("unsupported memory operation %q", t.operation)), nil
 	}
+}
+
+func (t *memoryTool) feedback(ctx context.Context, store *memorystore.Store, params map[string]interface{}) (*toolkit.ToolResult, error) {
+	id := strings.TrimSpace(memoryStringParam(params, "id"))
+	if id == "" {
+		return memoryToolError(fmt.Errorf("id is required")), nil
+	}
+	feedback, err := store.RecordFeedback(ctx, memorystore.FeedbackInput{
+		MemoryID:  id,
+		SessionID: strings.TrimSpace(toolctx.SessionID(ctx)),
+		TurnID:    strings.TrimSpace(toolctx.TurnID(ctx)),
+		Kind:      memorystore.MemoryFeedbackKind(memoryStringParam(params, "kind")),
+		Comment:   memoryStringParam(params, "comment"),
+		Actor:     "agent",
+	})
+	if err != nil {
+		return memoryToolError(err), nil
+	}
+	return memoryToolJSON(feedback), nil
 }
 
 func (t *memoryTool) openStore() (*memorystore.Store, error) {
@@ -295,6 +324,58 @@ func (t *memoryTool) coreGet(ctx context.Context, store *memorystore.Store) (*to
 		})
 	}
 	return memoryToolJSON(map[string]interface{}{"core": core, "status": memorystore.CoreStatusActive}), nil
+}
+
+func (t *memoryTool) episodes(ctx context.Context, store *memorystore.Store, params map[string]interface{}) (*toolkit.ToolResult, error) {
+	sessionID := strings.TrimSpace(memoryStringParam(params, "session_id"))
+	if sessionID != "" {
+		currentSessionID := strings.TrimSpace(toolctx.SessionID(ctx))
+		if currentSessionID == "" || sessionID != currentSessionID {
+			return memoryToolError(fmt.Errorf("cross-session Episode lookup requires admin authorization")), nil
+		}
+	}
+	episodes, err := store.ListEpisodes(ctx, memorystore.EpisodeFilter{
+		TaskID:    strings.TrimSpace(memoryStringParam(params, "task_id")),
+		SessionID: sessionID,
+		Outcome:   memorystore.EpisodeOutcome(strings.ToLower(strings.TrimSpace(memoryStringParam(params, "outcome")))),
+		Limit:     memoryBoundedIntParam(params, "limit", 20, 100),
+	})
+	if err != nil {
+		return memoryToolError(err), nil
+	}
+	return memoryToolJSON(map[string]interface{}{"items": episodes, "count": len(episodes)}), nil
+}
+
+func (t *memoryTool) patches(ctx context.Context, store *memorystore.Store, params map[string]interface{}) (*toolkit.ToolResult, error) {
+	patches, err := store.ListPatches(ctx, memorystore.PatchFilter{
+		Status: memorystore.PatchStatus(strings.ToLower(strings.TrimSpace(memoryStringParam(params, "status")))),
+		Risk:   memorystore.PatchRisk(strings.ToLower(strings.TrimSpace(memoryStringParam(params, "risk")))),
+		Limit:  memoryBoundedIntParam(params, "limit", 20, 100),
+	})
+	if err != nil {
+		return memoryToolError(err), nil
+	}
+	return memoryToolJSON(map[string]interface{}{"items": patches, "count": len(patches)}), nil
+}
+
+func (t *memoryTool) patchRead(ctx context.Context, store *memorystore.Store, params map[string]interface{}) (*toolkit.ToolResult, error) {
+	id := strings.TrimSpace(memoryStringParam(params, "id"))
+	if id == "" {
+		return memoryToolError(fmt.Errorf("id is required")), nil
+	}
+	patch, err := store.GetPatch(ctx, id)
+	if err != nil {
+		return memoryToolError(err), nil
+	}
+	return memoryToolJSON(patch), nil
+}
+
+func (t *memoryTool) dreams(ctx context.Context, store *memorystore.Store, params map[string]interface{}) (*toolkit.ToolResult, error) {
+	runs, err := store.ListDreamRuns(ctx, memoryBoundedIntParam(params, "limit", 20, 100))
+	if err != nil {
+		return memoryToolError(err), nil
+	}
+	return memoryToolJSON(map[string]interface{}{"items": runs, "count": len(runs)}), nil
 }
 
 func (t *memoryTool) add(ctx context.Context, store *memorystore.Store, params map[string]interface{}) (*toolkit.ToolResult, error) {

@@ -23,7 +23,8 @@ source_session_generation, source_turn_id, source_refs_json, content_hash,
 supersedes_id, revision, created_at, updated_at, last_used_at, use_count,
 valid_from, valid_until, freshness_status, last_verified_at, revalidate_after,
  stale_reason, deleted_at, metadata_json, title, summary, canonical_id, superseded_by, archived,
- tenant_id, owner_id, agent_id, task_id, scope_kind, scope_key
+ tenant_id, owner_id, agent_id, task_id, scope_kind, scope_key,
+ trust_level, trust_reason, trusted_at, feedback_score
 `
 
 // RecordVersion is an immutable snapshot of a memory entry at one revision.
@@ -66,9 +67,10 @@ SELECT `+recordVersionSelectColumns+`
 FROM memory_entries AS e
 WHERE NOT EXISTS (
     SELECT 1 FROM memory_versions AS v
-    WHERE v.memory_id = e.id AND v.project_key = e.project_key AND v.version = e.revision
+    WHERE v.memory_id = e.id AND v.tenant_id = e.tenant_id
+      AND v.project_key = e.project_key AND v.version = e.revision
 )
-ORDER BY e.project_key, e.id
+ORDER BY e.tenant_id, e.project_key, e.id
 `)
 	if err != nil {
 		return err
@@ -127,12 +129,12 @@ INSERT OR IGNORE INTO memory_versions (
 	return tx.Commit()
 }
 
-func loadRecordTx(ctx context.Context, tx *sql.Tx, id, projectKey string) (Record, error) {
+func loadRecordTx(ctx context.Context, tx *sql.Tx, id, tenantID, projectKey string) (Record, error) {
 	return scanRecordColumns(tx.QueryRowContext(ctx, `
 SELECT `+recordVersionSelectColumns+`
 FROM memory_entries
-WHERE id = ? AND project_key = ?
-`, strings.TrimSpace(id), strings.TrimSpace(projectKey)))
+WHERE id = ? AND tenant_id = ? AND project_key = ?
+`, strings.TrimSpace(id), strings.TrimSpace(tenantID), strings.TrimSpace(projectKey)))
 }
 
 func appendRecordVersionTx(
@@ -187,12 +189,12 @@ INSERT INTO memory_versions (
 // appendCurrentRecordVersionTx reloads the written row from the same
 // transaction so snapshots reflect database-normalized values, not stale
 // pre-update structs.
-func appendCurrentRecordVersionTx(
+func (s *Store) appendCurrentRecordVersionTx(
 	ctx context.Context,
 	tx *sql.Tx,
 	id, projectKey, changedBy, reason, changeType, sourceEventID string,
 ) error {
-	record, err := loadRecordTx(ctx, tx, id, projectKey)
+	record, err := loadRecordTx(ctx, tx, id, s.tenantID(), projectKey)
 	if err != nil {
 		return err
 	}
@@ -240,12 +242,6 @@ VALUES (?, ?)
 	return nil
 }
 
-func purgeRecordVersionsForProjectTx(ctx context.Context, tx *sql.Tx, projectKey string) error {
-	return purgeRecordVersionsTx(ctx, tx, projectKey, `
-DELETE FROM memory_versions WHERE project_key = ?
-`, projectKey)
-}
-
 // ListRecordVersions returns immutable revisions for one record in the
 // current project only. The record lookup intentionally preserves the same
 // project isolation and not-found behavior as GetRecord.
@@ -273,9 +269,9 @@ SELECT id, memory_id, version, project_key, scope_kind, scope_key, record_json,
        changed_by, change_reason, change_type, COALESCE(source_event_id, ''),
        valid_from, valid_until, created_at
 FROM memory_versions
-WHERE memory_id = ? AND project_key = ?
+WHERE memory_id = ? AND tenant_id = ? AND project_key = ?
 `
-	args := []interface{}{strings.TrimSpace(id), s.cfg.ProjectKey}
+	args := []interface{}{strings.TrimSpace(id), s.tenantID(), s.cfg.ProjectKey}
 	if limit == 0 {
 		query += "ORDER BY version ASC"
 	} else {
@@ -339,8 +335,8 @@ func (s *Store) ListRecordsAsOf(ctx context.Context, filter RecordFilter, asOf t
 	query := `
 SELECT memory_id, version, created_at, record_json
 FROM memory_versions
-WHERE project_key = ?`
-	args := []interface{}{s.cfg.ProjectKey}
+WHERE tenant_id = ? AND project_key = ?`
+	args := []interface{}{s.tenantID(), s.cfg.ProjectKey}
 	if asOf.UTC().Year() < 9999 {
 		upperBound := asOf.UTC().Truncate(time.Second).Add(time.Second).Format(time.RFC3339)
 		query += " AND created_at < ?"
@@ -399,7 +395,7 @@ WHERE project_key = ?`
 		record := snapshot.record
 		// Defend project/scope isolation even if a malformed historical
 		// snapshot was imported before the version writer enforced it.
-		if record.ProjectKey != s.cfg.ProjectKey || record.Scope != ScopeProject {
+		if record.TenantID != s.tenantID() || record.ProjectKey != s.cfg.ProjectKey || record.Scope != ScopeProject {
 			continue
 		}
 		validFrom := record.ValidFrom
@@ -553,7 +549,7 @@ func (s *Store) RollbackRecord(ctx context.Context, id string, opts RecordRollba
 	if err := validateMaintenanceLeaseTx(ctx, tx, s.cfg.ProjectKey); err != nil {
 		return Record{}, err
 	}
-	current, err := loadRecordTx(ctx, tx, id, s.cfg.ProjectKey)
+	current, err := loadRecordTx(ctx, tx, id, s.tenantID(), s.cfg.ProjectKey)
 	if err != nil {
 		return Record{}, err
 	}
@@ -566,8 +562,8 @@ func (s *Store) RollbackRecord(ctx context.Context, id string, opts RecordRollba
 	var versionJSON string
 	err = tx.QueryRowContext(ctx, `
 SELECT record_json FROM memory_versions
-WHERE memory_id = ? AND project_key = ? AND version = ?
-`, id, s.cfg.ProjectKey, opts.TargetVersion).Scan(&versionJSON)
+WHERE memory_id = ? AND tenant_id = ? AND project_key = ? AND version = ?
+`, id, s.tenantID(), s.cfg.ProjectKey, opts.TargetVersion).Scan(&versionJSON)
 	if err != nil {
 		return Record{}, err
 	}
@@ -590,8 +586,8 @@ WHERE memory_id = ? AND project_key = ? AND version = ?
 	} else if target.Status == StatusSuperseded && target.SupersededBy != "" {
 		var successorStatus string
 		if err := tx.QueryRowContext(ctx, `
-SELECT status FROM memory_entries WHERE id = ? AND project_key = ?
-`, target.SupersededBy, s.cfg.ProjectKey).Scan(&successorStatus); err != nil {
+SELECT status FROM memory_entries WHERE id = ? AND tenant_id = ? AND project_key = ?
+`, target.SupersededBy, s.tenantID(), s.cfg.ProjectKey).Scan(&successorStatus); err != nil {
 			return Record{}, fmt.Errorf("memorystore: rollback target successor is unavailable: %w", err)
 		}
 		if successorStatus != string(StatusActive) {
@@ -602,6 +598,12 @@ SELECT status FROM memory_entries WHERE id = ? AND project_key = ?
 	restored := target
 	restored.ID = current.ID
 	restored.Scope = current.Scope
+	restored.ScopeKind = current.ScopeKind
+	restored.ScopeKey = current.ScopeKey
+	restored.TenantID = current.TenantID
+	restored.OwnerID = current.OwnerID
+	restored.AgentID = current.AgentID
+	restored.TaskID = current.TaskID
 	restored.ProjectKey = current.ProjectKey
 	restored.Kind = current.Kind
 	restored.CreatedAt = current.CreatedAt
@@ -670,7 +672,7 @@ UPDATE memory_entries SET
     freshness_status = ?, last_verified_at = ?, revalidate_after = ?, stale_reason = ?,
     deleted_at = ?, metadata_json = ?, title = ?, summary = ?, canonical_id = ?,
     superseded_by = ?, archived = ?
-WHERE id = ? AND project_key = ? AND revision = ?
+WHERE id = ? AND tenant_id = ? AND project_key = ? AND revision = ?
 `, string(restored.Status), restored.Text, restored.NormalizedText, string(tagsJSON),
 		restored.Confidence, restored.Sensitivity, boolInt(restored.Pinned),
 		restored.RetentionClass, restored.ContentHash, nullableString(restored.SupersedesID),
@@ -679,7 +681,7 @@ WHERE id = ? AND project_key = ? AND revision = ?
 		nullableTime(restored.RevalidateAfter), nullableString(restored.StaleReason),
 		nullableTime(restored.DeletedAt), string(metadataJSON), restored.Title,
 		restored.Summary, restored.CanonicalID, nullableString(restored.SupersededBy),
-		boolInt(restored.Archived), current.ID, s.cfg.ProjectKey, current.Revision)
+		boolInt(restored.Archived), current.ID, s.tenantID(), s.cfg.ProjectKey, current.Revision)
 	if err != nil {
 		return Record{}, err
 	}
@@ -689,17 +691,19 @@ WHERE id = ? AND project_key = ? AND revision = ?
 	if restored.Status == StatusDeleted {
 		if _, err := tx.ExecContext(ctx, `
 INSERT OR IGNORE INTO memory_suppressions (
-    id, scope, project_key, content_hash, reason, source_memory_id, created_at, metadata_json
-) VALUES (?, ?, ?, ?, 'deleted', ?, ?, '{}')
+    id, scope, project_key, content_hash, reason, source_memory_id, created_at, metadata_json,
+    tenant_id, owner_id, agent_id, task_id, scope_kind, scope_key
+) VALUES (?, ?, ?, ?, 'deleted', ?, ?, '{}', ?, ?, ?, ?, ?, ?)
 `, "sup_"+uuid.NewString(), string(restored.Scope), restored.ProjectKey,
-			restored.ContentHash, restored.ID, now); err != nil {
+			restored.ContentHash, restored.ID, now, restored.TenantID, restored.OwnerID,
+			restored.AgentID, restored.TaskID, string(restored.ScopeKind), restored.ScopeKey); err != nil {
 			return Record{}, err
 		}
 	} else {
 		if _, err := tx.ExecContext(ctx, `
 DELETE FROM memory_suppressions
-WHERE source_memory_id = ? AND project_key = ? AND reason = 'deleted'
-`, restored.ID, restored.ProjectKey); err != nil {
+WHERE source_memory_id = ? AND tenant_id = ? AND project_key = ? AND reason = 'deleted'
+`, restored.ID, s.tenantID(), restored.ProjectKey); err != nil {
 			return Record{}, err
 		}
 	}
@@ -709,8 +713,8 @@ WHERE source_memory_id = ? AND project_key = ? AND reason = 'deleted'
 		// correction suppression created when that claim was superseded.
 		if _, err := tx.ExecContext(ctx, `
 DELETE FROM memory_suppressions
-WHERE source_memory_id = ? AND project_key = ? AND reason = 'corrected'
-`, restored.ID, restored.ProjectKey); err != nil {
+WHERE source_memory_id = ? AND tenant_id = ? AND project_key = ? AND reason = 'corrected'
+`, restored.ID, s.tenantID(), restored.ProjectKey); err != nil {
 			return Record{}, err
 		}
 	}
@@ -721,7 +725,7 @@ WHERE source_memory_id = ? AND project_key = ? AND reason = 'corrected'
 	if err != nil {
 		return Record{}, err
 	}
-	if err := appendCurrentRecordVersionTx(ctx, tx, restored.ID, restored.ProjectKey,
+	if err := s.appendCurrentRecordVersionTx(ctx, tx, restored.ID, restored.ProjectKey,
 		actor, opts.Reason, "rollback", eventID); err != nil {
 		return Record{}, err
 	}
@@ -738,14 +742,14 @@ func (s *Store) rollbackSupersedingSuccessorTx(ctx context.Context, tx *sql.Tx, 
 	if strings.TrimSpace(record.SupersededBy) == "" {
 		return fmt.Errorf("memorystore: superseded record has no successor to revert")
 	}
-	successor, err := loadRecordTx(ctx, tx, record.SupersededBy, record.ProjectKey)
+	successor, err := loadRecordTx(ctx, tx, record.SupersededBy, s.tenantID(), record.ProjectKey)
 	if err != nil {
 		return fmt.Errorf("memorystore: load superseding successor: %w", err)
 	}
 	if successor.Status != StatusActive || successor.SupersedesID != record.ID {
 		return fmt.Errorf("memorystore: superseding successor changed; rollback it separately first")
 	}
-	linkRevision, err := supersedingLinkRevisionTx(ctx, tx, successor.ID, record.ProjectKey, record.ID)
+	linkRevision, err := supersedingLinkRevisionTx(ctx, tx, successor.ID, s.tenantID(), record.ProjectKey, record.ID)
 	if err != nil {
 		return err
 	}
@@ -762,8 +766,8 @@ SET status = 'superseded', superseded_by = NULL,
     supersedes_id = CASE WHEN supersedes_id = ? THEN NULL ELSE supersedes_id END,
     valid_until = ?,
     revision = revision + 1, updated_at = ?
-WHERE id = ? AND project_key = ? AND revision = ? AND status = 'active'
-`, record.ID, now, now, successor.ID, record.ProjectKey, successor.Revision)
+WHERE id = ? AND tenant_id = ? AND project_key = ? AND revision = ? AND status = 'active'
+`, record.ID, now, now, successor.ID, s.tenantID(), record.ProjectKey, successor.Revision)
 	if err != nil {
 		return err
 	}
@@ -778,7 +782,7 @@ WHERE id = ? AND project_key = ? AND revision = ? AND status = 'active'
 	if err != nil {
 		return err
 	}
-	if err := appendCurrentRecordVersionTx(ctx, tx, successor.ID, successor.ProjectKey,
+	if err := s.appendCurrentRecordVersionTx(ctx, tx, successor.ID, successor.ProjectKey,
 		firstNonEmpty(opts.ChangedBy, "user"), opts.Reason, "rollback", eventID); err != nil {
 		return err
 	}
@@ -791,14 +795,14 @@ WHERE id = ? AND project_key = ? AND revision = ? AND status = 'active'
 func supersedingLinkRevisionTx(
 	ctx context.Context,
 	tx *sql.Tx,
-	successorID, projectKey, supersedesID string,
+	successorID, tenantID, projectKey, supersedesID string,
 ) (int64, error) {
 	rows, err := tx.QueryContext(ctx, `
 SELECT version, record_json
 FROM memory_versions
-WHERE memory_id = ? AND project_key = ?
+WHERE memory_id = ? AND tenant_id = ? AND project_key = ?
 ORDER BY version ASC
-`, successorID, projectKey)
+`, successorID, tenantID, projectKey)
 	if err != nil {
 		return 0, err
 	}

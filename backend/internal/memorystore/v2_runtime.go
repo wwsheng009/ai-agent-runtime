@@ -79,7 +79,7 @@ func (s *Store) EnsureJob(ctx context.Context, job MemoryJob) (MemoryJob, error)
 	if err := validateMaintenanceLeaseTx(ctx, tx, job.ProjectKey); err != nil {
 		return MemoryJob{}, err
 	}
-	if err := checkJobPurgeFenceIdentityTx(ctx, tx, job.ProjectKey, job.Kind,
+	if err := checkJobPurgeFenceIdentityTx(ctx, tx, s.tenantID(), job.ProjectKey, job.Kind,
 		job.JobKey, job.SessionID, job.SessionGeneration, job.CaptureReceiptID); err != nil {
 		return MemoryJob{}, err
 	}
@@ -89,8 +89,9 @@ INSERT INTO memory_jobs (
     max_attempts, retry_at, last_error, input_watermark, created_at, updated_at,
     session_id, session_generation, capture_receipt_id, source_start_seq,
     source_end_seq, source_revision, source_hash, available_at, deadline_at,
-    heartbeat_at, deferred_until, dead_letter_at, dead_letter_reason, repair_only
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    heartbeat_at, deferred_until, dead_letter_at, dead_letter_reason, repair_only,
+    tenant_id, scope_kind, scope_key
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(kind, scope, project_key, job_key) DO NOTHING
 `, job.ID, job.Kind, job.JobKey, string(job.Scope), job.ProjectKey, string(job.Status),
 		job.Priority, job.Attempt, job.MaxAttempts, nullableTime(job.RetryAt),
@@ -100,7 +101,8 @@ ON CONFLICT(kind, scope, project_key, job_key) DO NOTHING
 		job.SourceStartSeq, job.SourceEndSeq, job.SourceRevision, strings.TrimSpace(job.SourceHash),
 		nullableTime(job.AvailableAt), nullableTime(job.DeadlineAt), nullableTime(job.HeartbeatAt),
 		nullableTime(job.DeferredUntil), nullableTime(job.DeadLetterAt),
-		nullableString(job.DeadLetterReason), boolInt(job.RepairOnly))
+		nullableString(job.DeadLetterReason), boolInt(job.RepairOnly),
+		s.tenantID(), string(ScopeProject), job.ProjectKey)
 	if err != nil {
 		return MemoryJob{}, fmt.Errorf("memorystore: ensure job: %w", err)
 	}
@@ -142,14 +144,15 @@ func (s *Store) EnqueueCoreRebuild(ctx context.Context, maxAttempts int) (Memory
 	if err := validateMaintenanceLeaseTx(ctx, tx, projectKey); err != nil {
 		return MemoryJob{}, err
 	}
-	if err := checkJobPurgeFenceIdentityTx(ctx, tx, projectKey, kind, jobKey, "", 0, ""); err != nil {
+	if err := checkJobPurgeFenceIdentityTx(ctx, tx, s.tenantID(), projectKey, kind, jobKey, "", 0, ""); err != nil {
 		return MemoryJob{}, err
 	}
 	_, err = tx.ExecContext(ctx, `
 INSERT INTO memory_jobs (
     id, kind, job_key, scope, project_key, status, priority, attempt,
-    max_attempts, created_at, updated_at, deadline_at
-) VALUES (?, ?, ?, ?, ?, 'pending', ?, 0, ?, ?, ?, ?)
+    max_attempts, created_at, updated_at, deadline_at,
+    tenant_id, scope_kind, scope_key
+) VALUES (?, ?, ?, ?, ?, 'pending', ?, 0, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(kind, scope, project_key, job_key) DO UPDATE SET
     status = CASE
         WHEN memory_jobs.status IN ('succeeded', 'failed', 'cancelled', 'dead_letter')
@@ -182,7 +185,8 @@ ON CONFLICT(kind, scope, project_key, job_key) DO UPDATE SET
     updated_at = excluded.updated_at
 WHERE memory_jobs.status IN ('pending', 'succeeded', 'failed', 'cancelled', 'dead_letter')
 `, "job_"+uuid.NewString(), kind, jobKey, string(ScopeProject), projectKey,
-		JobPriorityCoreRebuild, maxAttempts, nowText, nowText, deadlineText)
+		JobPriorityCoreRebuild, maxAttempts, nowText, nowText, deadlineText,
+		s.tenantID(), string(ScopeProject), projectKey)
 	if err != nil {
 		return MemoryJob{}, fmt.Errorf("memorystore: enqueue core rebuild: %w", err)
 	}
@@ -208,8 +212,9 @@ SELECT id, kind, job_key, scope, project_key, status, priority,
        COALESCE(available_at, ''), COALESCE(deadline_at, ''), COALESCE(heartbeat_at, ''),
        COALESCE(deferred_until, ''), COALESCE(dead_letter_at, ''),
        COALESCE(dead_letter_reason, ''), repair_only
-FROM memory_jobs WHERE kind = ? AND scope = ? AND project_key = ? AND job_key = ?
-`, kind, string(scope), projectKey, jobKey)
+FROM memory_jobs
+WHERE tenant_id = ? AND kind = ? AND scope = ? AND project_key = ? AND job_key = ?
+`, s.tenantID(), kind, string(scope), projectKey, jobKey)
 	return scanMemoryJobRow(row)
 }
 
@@ -238,8 +243,8 @@ func (s *Store) GetJob(ctx context.Context, id string) (MemoryJob, error) {
         COALESCE(deferred_until, ''), COALESCE(dead_letter_at, ''),
         COALESCE(dead_letter_reason, ''), repair_only
  FROM memory_jobs
- WHERE id = ? AND project_key = ?
- `, id, s.cfg.ProjectKey)
+ WHERE id = ? AND tenant_id = ? AND project_key = ?
+ `, id, s.tenantID(), s.cfg.ProjectKey)
 	return scanMemoryJobRow(row)
 }
 
@@ -311,14 +316,15 @@ SET status = CASE
         WHEN deadline_at IS NOT NULL AND deadline_at != '' AND deadline_at <= ?
         THEN 'job deadline exceeded' ELSE last_error END,
     updated_at = ?
-WHERE project_key = ? AND status = 'running'
+WHERE tenant_id = ? AND project_key = ? AND status = 'running'
   AND lease_until IS NOT NULL AND lease_until != '' AND lease_until <= ?
 	`, nowText, nowText, nowText, nowText,
-		nowText, nowText, nowText, nowText, nowText, projectKey, nowText); err != nil {
+		nowText, nowText, nowText, nowText, nowText, s.tenantID(), projectKey, nowText); err != nil {
 		return nil, fmt.Errorf("memorystore: reclaim expired jobs: %w", err)
 	}
-	args := []interface{}{string(JobStatusPending), now.Format(time.RFC3339Nano), projectKey}
+	args := []interface{}{s.tenantID(), string(JobStatusPending), now.Format(time.RFC3339Nano), projectKey}
 	where := []string{
+		"tenant_id = ?",
 		"status = ?",
 		"(retry_at IS NULL OR retry_at = '' OR retry_at <= ?)",
 		"project_key = ?",
@@ -375,14 +381,14 @@ ORDER BY priority DESC, created_at ASC LIMIT ?
 	_ = rows.Close()
 	claimed := make([]MemoryJob, 0, len(candidates))
 	for _, job := range candidates {
-		if err := checkJobPurgeFenceByIDTx(ctx, tx, job.ID, projectKey); err != nil {
+		if err := checkJobPurgeFenceByIDTx(ctx, tx, s.tenantID(), job.ID, projectKey); err != nil {
 			if errors.Is(err, ErrSessionPurgeGenerationMismatch) {
 				_, _ = tx.ExecContext(ctx, `
 UPDATE memory_jobs
 SET status = 'cancelled', worker_id = NULL, lease_until = NULL,
     last_error = ?, finished_at = ?, updated_at = ?
-WHERE id = ? AND status = 'pending'
-`, err.Error(), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), job.ID)
+WHERE id = ? AND tenant_id = ? AND status = 'pending'
+`, err.Error(), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), job.ID, s.tenantID())
 				continue
 			}
 			return nil, err
@@ -412,10 +418,10 @@ UPDATE memory_jobs
 SET status = ?, deadline_at = ?, worker_id = NULL, lease_until = NULL, retry_at = NULL,
     deferred_until = NULL, finished_at = ?, dead_letter_at = NULLIF(?, ''),
     dead_letter_reason = NULLIF(?, ''), last_error = ?, updated_at = ?
-WHERE id = ? AND project_key = ? AND status = 'pending'
+WHERE id = ? AND tenant_id = ? AND project_key = ? AND status = 'pending'
 `, string(nextStatus), job.DeadlineAt.UTC().Format(time.RFC3339Nano),
 				nowText, deadLetterAt, deadLetterReason,
-				"job deadline exceeded", nowText, job.ID, projectKey)
+				"job deadline exceeded", nowText, job.ID, s.tenantID(), projectKey)
 			if updateErr != nil {
 				return nil, fmt.Errorf("memorystore: expire pending job %s: %w", job.ID, updateErr)
 			}
@@ -432,10 +438,10 @@ SET status = 'running', deadline_at = COALESCE(NULLIF(deadline_at, ''), ?),
     worker_id = ?, lease_until = ?, attempt = attempt + 1,
     started_at = COALESCE(started_at, ?), heartbeat_at = ?,
     updated_at = ?
-WHERE id = ? AND status = 'pending'
+WHERE id = ? AND tenant_id = ? AND status = 'pending'
 `, job.DeadlineAt.UTC().Format(time.RFC3339Nano),
 			strings.TrimSpace(opts.WorkerID), leaseUntil, now.Format(time.RFC3339Nano),
-			now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), job.ID)
+			now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), job.ID, s.tenantID())
 		if err != nil {
 			return nil, fmt.Errorf("memorystore: claim job %s: %w", job.ID, err)
 		}
@@ -483,7 +489,7 @@ func (s *Store) HeartbeatJobForWorkerAttempt(
 	if err := validateMaintenanceLeaseTx(ctx, tx, s.cfg.ProjectKey); err != nil {
 		return err
 	}
-	if err := checkJobPurgeFenceByIDTx(ctx, tx, id, s.cfg.ProjectKey); err != nil {
+	if err := checkJobPurgeFenceByIDTx(ctx, tx, s.tenantID(), id, s.cfg.ProjectKey); err != nil {
 		return err
 	}
 	now := time.Now().UTC()
@@ -492,12 +498,12 @@ func (s *Store) HeartbeatJobForWorkerAttempt(
 	res, err := tx.ExecContext(ctx, `
 UPDATE memory_jobs
 SET lease_until = ?, heartbeat_at = ?, updated_at = ?
-WHERE id = ? AND project_key = ? AND status = 'running'
+WHERE id = ? AND tenant_id = ? AND project_key = ? AND status = 'running'
   AND worker_id = ? AND attempt = ?
   AND lease_until IS NOT NULL AND lease_until != '' AND lease_until > ?
   AND (deadline_at IS NULL OR deadline_at = '' OR deadline_at > ?)
 `, leaseUntil.Format(time.RFC3339Nano), nowText, nowText,
-		id, s.cfg.ProjectKey, workerID, attempt, nowText, nowText)
+		id, s.tenantID(), s.cfg.ProjectKey, workerID, attempt, nowText, nowText)
 	if err != nil {
 		return fmt.Errorf("memorystore: heartbeat job %s: %w", id, err)
 	}
@@ -525,7 +531,7 @@ func (s *Store) CompleteJob(ctx context.Context, id, watermark string) error {
 		return fmt.Errorf("memorystore: begin complete job: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	if err := checkJobPurgeFenceByIDTx(ctx, tx, id, s.cfg.ProjectKey); err != nil {
+	if err := checkJobPurgeFenceByIDTx(ctx, tx, s.tenantID(), id, s.cfg.ProjectKey); err != nil {
 		return err
 	}
 	now := time.Now().UTC()
@@ -534,8 +540,9 @@ UPDATE memory_jobs SET status = 'succeeded', worker_id = NULL, lease_until = NUL
     deadline_at = NULL, heartbeat_at = NULL,
     finished_at = ?, last_success_watermark = ?, updated_at = ?
 WHERE id = ?
+  AND tenant_id = ?
   AND project_key = ?
-`, now.Format(time.RFC3339Nano), nullableString(watermark), now.Format(time.RFC3339Nano), id, s.cfg.ProjectKey); err != nil {
+`, now.Format(time.RFC3339Nano), nullableString(watermark), now.Format(time.RFC3339Nano), id, s.tenantID(), s.cfg.ProjectKey); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -556,7 +563,7 @@ func (s *Store) CompleteJobForWorker(ctx context.Context, id, workerID, watermar
 	if err := validateMaintenanceLeaseTx(ctx, tx, s.cfg.ProjectKey); err != nil {
 		return err
 	}
-	if err := checkJobPurgeFenceByIDTx(ctx, tx, id, s.cfg.ProjectKey); err != nil {
+	if err := checkJobPurgeFenceByIDTx(ctx, tx, s.tenantID(), id, s.cfg.ProjectKey); err != nil {
 		return err
 	}
 	now := time.Now().UTC()
@@ -564,9 +571,9 @@ func (s *Store) CompleteJobForWorker(ctx context.Context, id, workerID, watermar
 UPDATE memory_jobs SET status = 'succeeded', worker_id = NULL, lease_until = NULL,
     deadline_at = NULL, heartbeat_at = NULL,
     finished_at = ?, last_success_watermark = ?, updated_at = ?
-WHERE id = ? AND project_key = ? AND status = 'running' AND worker_id = ?
+WHERE id = ? AND tenant_id = ? AND project_key = ? AND status = 'running' AND worker_id = ?
 `, now.Format(time.RFC3339Nano), nullableString(watermark), now.Format(time.RFC3339Nano),
-		id, s.cfg.ProjectKey, strings.TrimSpace(workerID))
+		id, s.tenantID(), s.cfg.ProjectKey, strings.TrimSpace(workerID))
 	if err != nil {
 		return err
 	}
@@ -603,7 +610,7 @@ func (s *Store) CompleteJobForWorkerAttempt(
 	if err := validateMaintenanceLeaseTx(ctx, tx, s.cfg.ProjectKey); err != nil {
 		return err
 	}
-	if err := checkJobPurgeFenceByIDTx(ctx, tx, id, s.cfg.ProjectKey); err != nil {
+	if err := checkJobPurgeFenceByIDTx(ctx, tx, s.tenantID(), id, s.cfg.ProjectKey); err != nil {
 		return err
 	}
 	now := time.Now().UTC()
@@ -613,11 +620,11 @@ UPDATE memory_jobs
 SET status = 'succeeded', worker_id = NULL, lease_until = NULL,
     deadline_at = NULL, heartbeat_at = NULL, finished_at = ?,
     last_success_watermark = ?, updated_at = ?
-WHERE id = ? AND project_key = ? AND status = 'running'
+WHERE id = ? AND tenant_id = ? AND project_key = ? AND status = 'running'
   AND worker_id = ? AND attempt = ?
   AND COALESCE(lease_until, '') > ? AND COALESCE(deadline_at, '') > ?
 `, nowText, nullableString(watermark), nowText,
-		id, s.cfg.ProjectKey, workerID, attempt, nowText, nowText)
+		id, s.tenantID(), s.cfg.ProjectKey, workerID, attempt, nowText, nowText)
 	if err != nil {
 		return fmt.Errorf("memorystore: complete job attempt: %w", err)
 	}
@@ -641,12 +648,14 @@ func (s *Store) FailJob(ctx context.Context, id, errText string, retryAt time.Ti
 		return fmt.Errorf("memorystore: begin fail job: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	if err := checkJobPurgeFenceByIDTx(ctx, tx, id, s.cfg.ProjectKey); err != nil {
+	if err := checkJobPurgeFenceByIDTx(ctx, tx, s.tenantID(), id, s.cfg.ProjectKey); err != nil {
 		return err
 	}
 	var attempt, maxAttempts int
-	if err := tx.QueryRowContext(ctx, `SELECT attempt, max_attempts FROM memory_jobs WHERE id = ? AND project_key = ?`,
-		id, s.cfg.ProjectKey).Scan(&attempt, &maxAttempts); err != nil {
+	if err := tx.QueryRowContext(ctx, `
+SELECT attempt, max_attempts FROM memory_jobs
+WHERE id = ? AND tenant_id = ? AND project_key = ?
+`, id, s.tenantID(), s.cfg.ProjectKey).Scan(&attempt, &maxAttempts); err != nil {
 		return err
 	}
 	now := time.Now().UTC()
@@ -662,9 +671,10 @@ UPDATE memory_jobs SET status = ?, worker_id = NULL, lease_until = NULL,
     deadline_at = NULL, heartbeat_at = NULL,
     retry_at = ?, finished_at = ?, last_error = ?, updated_at = ?
 WHERE id = ?
+  AND tenant_id = ?
   AND project_key = ?
 `, string(status), nullableTime(retryAt), finishedAt, nullableString(errText),
-		now.Format(time.RFC3339Nano), id, s.cfg.ProjectKey); err != nil {
+		now.Format(time.RFC3339Nano), id, s.tenantID(), s.cfg.ProjectKey); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -686,7 +696,7 @@ func (s *Store) FailJobForWorker(ctx context.Context, id, workerID, errText stri
 	if err := validateMaintenanceLeaseTx(ctx, tx, s.cfg.ProjectKey); err != nil {
 		return err
 	}
-	if err := checkJobPurgeFenceByIDTx(ctx, tx, id, s.cfg.ProjectKey); err != nil {
+	if err := checkJobPurgeFenceByIDTx(ctx, tx, s.tenantID(), id, s.cfg.ProjectKey); err != nil {
 		return err
 	}
 	now := time.Now().UTC()
@@ -701,9 +711,9 @@ SET status = CASE WHEN attempt >= max_attempts THEN 'failed' ELSE 'pending' END,
     finished_at = CASE WHEN attempt >= max_attempts THEN ? ELSE NULL END,
     last_error = ?,
     updated_at = ?
-WHERE id = ? AND project_key = ? AND status = 'running' AND worker_id = ?
+WHERE id = ? AND tenant_id = ? AND project_key = ? AND status = 'running' AND worker_id = ?
 `, nullableTime(retryAt), now.Format(time.RFC3339Nano), nullableString(errText),
-		now.Format(time.RFC3339Nano), id, s.cfg.ProjectKey, strings.TrimSpace(workerID))
+		now.Format(time.RFC3339Nano), id, s.tenantID(), s.cfg.ProjectKey, strings.TrimSpace(workerID))
 	if err != nil {
 		return err
 	}
@@ -734,7 +744,7 @@ func (s *Store) FailJobForWorkerAttempt(ctx context.Context, id, workerID string
 	if err := validateMaintenanceLeaseTx(ctx, tx, s.cfg.ProjectKey); err != nil {
 		return err
 	}
-	if err := checkJobPurgeFenceByIDTx(ctx, tx, id, s.cfg.ProjectKey); err != nil {
+	if err := checkJobPurgeFenceByIDTx(ctx, tx, s.tenantID(), id, s.cfg.ProjectKey); err != nil {
 		return err
 	}
 	now := time.Now().UTC()
@@ -749,9 +759,9 @@ SET status = CASE WHEN attempt >= max_attempts THEN 'failed' ELSE 'pending' END,
     finished_at = CASE WHEN attempt >= max_attempts THEN ? ELSE NULL END,
     last_error = ?,
     updated_at = ?
-WHERE id = ? AND project_key = ? AND status = 'running' AND worker_id = ? AND attempt = ?
+WHERE id = ? AND tenant_id = ? AND project_key = ? AND status = 'running' AND worker_id = ? AND attempt = ?
 `, nullableTime(retryAt), now.Format(time.RFC3339Nano), nullableString(errText),
-		now.Format(time.RFC3339Nano), id, s.cfg.ProjectKey, strings.TrimSpace(workerID), attempt)
+		now.Format(time.RFC3339Nano), id, s.tenantID(), s.cfg.ProjectKey, strings.TrimSpace(workerID), attempt)
 	if err != nil {
 		return err
 	}
@@ -862,6 +872,9 @@ func (s *Store) PromoteCandidate(ctx context.Context, id string) (Record, error)
 	if record.Freshness != FreshnessFresh || !record.DeletedAt.IsZero() {
 		return Record{}, fmt.Errorf("memorystore: record %s is not fresh and cannot be promoted", id)
 	}
+	if !canPromoteTrustedRecord(record) {
+		return Record{}, fmt.Errorf("memorystore: untrusted external record cannot be promoted to %s", record.Kind)
+	}
 	db, err := s.ensureV2()
 	if err != nil {
 		return Record{}, err
@@ -882,9 +895,9 @@ func (s *Store) PromoteCandidate(ctx context.Context, id string) (Record, error)
 UPDATE memory_entries
 SET status = 'active', valid_from = ?, valid_until = NULL,
     revision = revision + 1, updated_at = ?
-WHERE id = ? AND project_key = ? AND revision = ? AND status = 'candidate'
+WHERE id = ? AND tenant_id = ? AND project_key = ? AND revision = ? AND status = 'candidate'
 `, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano),
-		record.ID, s.cfg.ProjectKey, record.Revision)
+		record.ID, s.tenantID(), s.cfg.ProjectKey, record.Revision)
 	if err != nil {
 		return Record{}, err
 	}
@@ -897,7 +910,7 @@ WHERE id = ? AND project_key = ? AND revision = ? AND status = 'candidate'
 	if err != nil {
 		return Record{}, err
 	}
-	if err := appendCurrentRecordVersionTx(ctx, tx, record.ID, record.ProjectKey,
+	if err := s.appendCurrentRecordVersionTx(ctx, tx, record.ID, record.ProjectKey,
 		"consolidation", "phase2 consolidation", "promote", eventID); err != nil {
 		return Record{}, err
 	}
@@ -949,9 +962,9 @@ func (s *Store) SupersedeRecord(ctx context.Context, id, supersededBy, reason st
 	res, err := tx.ExecContext(ctx, `
 UPDATE memory_entries
 SET status = 'superseded', superseded_by = ?, valid_until = ?, revision = revision + 1, updated_at = ?
-WHERE id = ? AND project_key = ? AND revision = ? AND status = 'active'
+WHERE id = ? AND tenant_id = ? AND project_key = ? AND revision = ? AND status = 'active'
 `, winner.ID, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano),
-		loser.ID, s.cfg.ProjectKey, loser.Revision)
+		loser.ID, s.tenantID(), s.cfg.ProjectKey, loser.Revision)
 	if err != nil {
 		return Record{}, err
 	}
@@ -961,10 +974,10 @@ WHERE id = ? AND project_key = ? AND revision = ? AND status = 'active'
 	winnerUpdate, err := tx.ExecContext(ctx, `
 UPDATE memory_entries
 SET supersedes_id = ?, revision = revision + 1, updated_at = ?
-WHERE id = ? AND project_key = ?
+WHERE id = ? AND tenant_id = ? AND project_key = ?
   AND revision = ? AND status = 'active'
   AND (supersedes_id IS NULL OR supersedes_id = '')
-`, loser.ID, now.Format(time.RFC3339Nano), winner.ID, s.cfg.ProjectKey, winner.Revision)
+`, loser.ID, now.Format(time.RFC3339Nano), winner.ID, s.tenantID(), s.cfg.ProjectKey, winner.Revision)
 	if err != nil {
 		return Record{}, err
 	}
@@ -974,8 +987,8 @@ WHERE id = ? AND project_key = ?
 		// must still fail closed instead of silently proceeding.
 		var currentRevision int64
 		if err := tx.QueryRowContext(ctx, `
-SELECT revision FROM memory_entries WHERE id = ? AND project_key = ?
-`, winner.ID, s.cfg.ProjectKey).Scan(&currentRevision); err != nil {
+SELECT revision FROM memory_entries WHERE id = ? AND tenant_id = ? AND project_key = ?
+`, winner.ID, s.tenantID(), s.cfg.ProjectKey).Scan(&currentRevision); err != nil {
 			return Record{}, err
 		}
 		if currentRevision != winner.Revision {
@@ -1017,7 +1030,7 @@ SELECT revision FROM memory_entries WHERE id = ? AND project_key = ?
 	if err != nil {
 		return Record{}, err
 	}
-	if err := appendCurrentRecordVersionTx(ctx, tx, loser.ID, loser.ProjectKey,
+	if err := s.appendCurrentRecordVersionTx(ctx, tx, loser.ID, loser.ProjectKey,
 		"consolidation", firstNonEmpty(reason, "superseded"), "supersede", loserEventID); err != nil {
 		return Record{}, err
 	}
@@ -1035,7 +1048,7 @@ SELECT revision FROM memory_entries WHERE id = ? AND project_key = ?
 		if err != nil {
 			return Record{}, err
 		}
-		if err := appendCurrentRecordVersionTx(ctx, tx, winner.ID, winner.ProjectKey,
+		if err := s.appendCurrentRecordVersionTx(ctx, tx, winner.ID, winner.ProjectKey,
 			"consolidation", "supersede link recorded", "supersede", winnerEventID); err != nil {
 			return Record{}, err
 		}
@@ -1066,9 +1079,9 @@ func (s *Store) reviveCandidate(ctx context.Context, db *sql.DB, record Record) 
 	err := db.QueryRowContext(ctx, `
  SELECT id, COALESCE(source_session_id, ''), source_session_generation, revision
  FROM memory_entries
- WHERE project_key = ? AND content_hash = ? AND status IN ('candidate', 'active')
+ WHERE tenant_id = ? AND project_key = ? AND content_hash = ? AND status IN ('candidate', 'active')
  LIMIT 1
- `, record.ProjectKey, record.ContentHash).Scan(
+ `, s.tenantID(), record.ProjectKey, record.ContentHash).Scan(
 		&existingID, &existingSession, &existingGeneration, &existingRevision,
 	)
 	if err == sql.ErrNoRows {
@@ -1099,11 +1112,11 @@ SET freshness_status = 'fresh', stale_reason = NULL, last_verified_at = ?,
     revalidate_after = ?, updated_at = ?, revision = revision + 1,
     confidence = CASE WHEN confidence < ? THEN ? ELSE confidence END,
     title = ?, summary = ?, canonical_id = ?, superseded_by = ?, archived = ?
- WHERE id = ? AND project_key = ? AND revision = ?
-`, now.Format(time.RFC3339Nano), nullableTime(record.RevalidateAfter),
+ WHERE id = ? AND tenant_id = ? AND project_key = ? AND revision = ?
+ `, now.Format(time.RFC3339Nano), nullableTime(record.RevalidateAfter),
 		now.Format(time.RFC3339Nano), record.Confidence, record.Confidence,
 		record.Title, record.Summary, record.CanonicalID, nullableString(record.SupersededBy), boolInt(record.Archived),
-		existingID, record.ProjectKey, existingRevision)
+		existingID, s.tenantID(), record.ProjectKey, existingRevision)
 	if err != nil {
 		return Record{}, false, err
 	}
@@ -1121,7 +1134,7 @@ SET freshness_status = 'fresh', stale_reason = NULL, last_verified_at = ?,
 	if err != nil {
 		return Record{}, false, err
 	}
-	if err := appendCurrentRecordVersionTx(ctx, tx, existingID, record.ProjectKey,
+	if err := s.appendCurrentRecordVersionTx(ctx, tx, existingID, record.ProjectKey,
 		"agent", "same-session re-extraction", "update", eventID); err != nil {
 		return Record{}, false, err
 	}
@@ -1203,12 +1216,12 @@ func (s *Store) markSessionSourcesStale(ctx context.Context, sessionID, projectK
 	query := `
 SELECT DISTINCT e.id, e.revision
 FROM memory_entries e
-WHERE e.project_key = ? AND e.source_session_id = ?
+WHERE e.tenant_id = ? AND e.project_key = ? AND e.source_session_id = ?
   AND e.source_kind IN ('session_extract', 'turn_window')
   AND e.status IN ('candidate', 'active')
   AND e.freshness_status != 'stale'
 `
-	args := []interface{}{projectKey, sessionID}
+	args := []interface{}{s.tenantID(), projectKey, sessionID}
 	if generation != nil {
 		query += ` AND e.source_session_generation = ?`
 		args = append(args, *generation)
@@ -1247,8 +1260,8 @@ WHERE e.project_key = ? AND e.source_session_id = ?
 		res, err := tx.ExecContext(ctx, `
 UPDATE memory_entries SET freshness_status = 'stale', stale_reason = ?,
     revision = revision + 1, updated_at = ?
- WHERE id = ? AND project_key = ? AND revision = ?
-`, reason, now.Format(time.RFC3339Nano), item.id, projectKey, item.revision)
+ WHERE id = ? AND tenant_id = ? AND project_key = ? AND revision = ?
+`, reason, now.Format(time.RFC3339Nano), item.id, s.tenantID(), projectKey, item.revision)
 		if err != nil {
 			return 0, err
 		}
@@ -1261,7 +1274,7 @@ UPDATE memory_entries SET freshness_status = 'stale', stale_reason = ?,
 		if err != nil {
 			return 0, err
 		}
-		if err := appendCurrentRecordVersionTx(ctx, tx, item.id, projectKey,
+		if err := s.appendCurrentRecordVersionTx(ctx, tx, item.id, projectKey,
 			"system:source_invalidation", reason, "update", eventID); err != nil {
 			return 0, err
 		}
@@ -1291,14 +1304,14 @@ func (s *Store) markSourceChanged(ctx context.Context, sessionID, projectKey str
 SELECT DISTINCT e.id, e.revision
 FROM memory_entries e
 JOIN memory_sources src ON src.memory_id = e.id
-WHERE e.project_key = ? AND e.source_session_id = ?
+WHERE e.tenant_id = ? AND e.project_key = ? AND e.source_session_id = ?
   AND e.source_kind IN ('session_extract', 'turn_window')
   AND e.status IN ('candidate', 'active')
   AND (
     (src.source_hash != '' AND src.source_hash != ?)
     OR (src.source_revision IS NOT NULL AND src.source_revision != ?)
   )`
-	args := []interface{}{projectKey, sessionID, strings.TrimSpace(newHash), newRevision}
+	args := []interface{}{s.tenantID(), projectKey, sessionID, strings.TrimSpace(newHash), newRevision}
 	if generation != nil {
 		query += ` AND e.source_session_generation = ? AND src.source_session_generation = ?`
 		args = append(args, *generation, *generation)
@@ -1343,8 +1356,8 @@ WHERE e.project_key = ? AND e.source_session_id = ?
 		res, err := tx.ExecContext(ctx, `
 UPDATE memory_entries SET freshness_status = 'stale', stale_reason = ?,
     revision = revision + 1, updated_at = ?
- WHERE id = ? AND project_key = ? AND revision = ?
-`, reason, now.Format(time.RFC3339Nano), item.id, projectKey, item.revision)
+ WHERE id = ? AND tenant_id = ? AND project_key = ? AND revision = ?
+`, reason, now.Format(time.RFC3339Nano), item.id, s.tenantID(), projectKey, item.revision)
 		if err != nil {
 			return 0, err
 		}
@@ -1357,7 +1370,7 @@ UPDATE memory_entries SET freshness_status = 'stale', stale_reason = ?,
 		if err != nil {
 			return 0, err
 		}
-		if err := appendCurrentRecordVersionTx(ctx, tx, item.id, projectKey,
+		if err := s.appendCurrentRecordVersionTx(ctx, tx, item.id, projectKey,
 			"system:source_invalidation", reason, "update", eventID); err != nil {
 			return 0, err
 		}
@@ -1454,8 +1467,8 @@ SELECT id, kind, job_key, scope, project_key, status, priority,
        COALESCE(available_at, ''), COALESCE(deadline_at, ''), COALESCE(heartbeat_at, ''),
        COALESCE(deferred_until, ''), COALESCE(dead_letter_at, ''),
        COALESCE(dead_letter_reason, ''), repair_only
-FROM memory_jobs WHERE project_key = ? ORDER BY created_at DESC LIMIT ?
-`, s.cfg.ProjectKey, limit)
+FROM memory_jobs WHERE tenant_id = ? AND project_key = ? ORDER BY created_at DESC LIMIT ?
+`, s.tenantID(), s.cfg.ProjectKey, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -1494,12 +1507,12 @@ func (s *Store) CancelStaleBaseExtractionJobs(ctx context.Context, sessionID, cu
 UPDATE memory_jobs
 SET status = 'cancelled', worker_id = NULL, lease_until = NULL,
     retry_at = NULL, finished_at = ?, last_error = ?, updated_at = ?
-WHERE project_key = ? AND kind = 'phase1_extract' AND status = 'pending'
+WHERE tenant_id = ? AND project_key = ? AND kind = 'phase1_extract' AND status = 'pending'
   AND job_key GLOB 'session:' || ? || ':*'
   AND job_key NOT GLOB 'session:' || ? || ':window:*'
   AND job_key NOT GLOB 'session:' || ? || ':byte-pages-v1:*'
   AND job_key != ?
-`, now, strings.TrimSpace(reason), now, s.cfg.ProjectKey,
+`, now, strings.TrimSpace(reason), now, s.tenantID(), s.cfg.ProjectKey,
 		sessionID, sessionID, sessionID, keepKey)
 	if err != nil {
 		return 0, fmt.Errorf("memorystore: cancel stale base extraction jobs: %w", err)

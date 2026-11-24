@@ -11,6 +11,7 @@ import (
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/memoryassembly"
 	"github.com/wwsheng009/ai-agent-runtime/internal/memoryruntime"
+	"github.com/wwsheng009/ai-agent-runtime/internal/memorytaskbridge"
 	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 )
 
@@ -49,6 +50,28 @@ func (h *localChatRuntimeHost) initializeMemoryRuntime(session *ChatSession) err
 	h.cleanupFns = append(h.cleanupFns, release)
 	h.bindMemoryDigestInvalidation()
 	return nil
+}
+
+func (h *localChatRuntimeHost) bindMemoryTaskCompletionEvents(sessions *runtimechat.SessionManager) {
+	if h == nil || h.MemoryRuntime == nil || sessions == nil || h.TeamStore == nil ||
+		h.Orchestrator == nil || h.Orchestrator.Events == nil {
+		return
+	}
+	h.memoryTaskBridgeOnce.Do(func() {
+		unsubscribe := memorytaskbridge.BindTeamEvents(h.Orchestrator.Events, memorytaskbridge.Dependencies{
+			TeamStore: h.TeamStore,
+			Sessions:  sessions,
+			RuntimeForSession: func(context.Context, string) (*memoryruntime.Runtime, error) {
+				return h.MemoryRuntime, nil
+			},
+			OnError: func(err error) {
+				logpkg.Warnf("memory task-completion bridge failed: %v", err)
+			},
+		})
+		if unsubscribe != nil {
+			h.cleanupFns = append(h.cleanupFns, unsubscribe)
+		}
+	})
 }
 
 // localTurnDigestSink is the single wiring point for both actor assembly paths

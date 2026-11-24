@@ -70,7 +70,7 @@ func (s *Store) RepairMissingJobDeadlines(
 		rows, queryErr := tx.QueryContext(runCtx, `
 SELECT id, kind, status, attempt, max_attempts, COALESCE(created_at, '')
 FROM memory_jobs
-WHERE project_key = ?
+WHERE tenant_id = ? AND project_key = ?
   AND COALESCE(deadline_at, '') = ''
   AND status = 'pending'
   AND (COALESCE(available_at, '') = '' OR available_at <= ?)
@@ -78,7 +78,7 @@ WHERE project_key = ?
   AND (COALESCE(deferred_until, '') = '' OR deferred_until <= ?)
 ORDER BY created_at ASC, id ASC
 LIMIT ?
-`, s.cfg.ProjectKey, nowText, nowText, nowText, limit)
+`, s.tenantID(), s.cfg.ProjectKey, nowText, nowText, nowText, limit)
 		if queryErr != nil {
 			return fmt.Errorf("memorystore: list jobs missing deadlines: %w", queryErr)
 		}
@@ -105,7 +105,7 @@ LIMIT ?
 			item.CreatedAt = createdAt.UTC()
 			item.DeadlineAt = createdAt.UTC().Add(DefaultMemoryJobTimeout)
 			item.Reason = "deadline_from_created_at"
-			if fenceErr := checkJobPurgeFenceByIDTx(runCtx, tx, id, s.cfg.ProjectKey); fenceErr != nil {
+			if fenceErr := checkJobPurgeFenceByIDTx(runCtx, tx, s.tenantID(), id, s.cfg.ProjectKey); fenceErr != nil {
 				if !errors.Is(fenceErr, ErrSessionPurgeGenerationMismatch) {
 					return fenceErr
 				}
@@ -124,10 +124,10 @@ LIMIT ?
 			update, updateErr := tx.ExecContext(runCtx, `
 UPDATE memory_jobs
 SET deadline_at = ?, updated_at = ?
-WHERE project_key = ? AND id = ?
+WHERE tenant_id = ? AND project_key = ? AND id = ?
   AND COALESCE(deadline_at, '') = ''
   AND status = ?
-			`, deadlineText, nowText, s.cfg.ProjectKey, id, status)
+			`, deadlineText, nowText, s.tenantID(), s.cfg.ProjectKey, id, status)
 			if updateErr != nil {
 				return fmt.Errorf("memorystore: repair job deadline: %w", updateErr)
 			}

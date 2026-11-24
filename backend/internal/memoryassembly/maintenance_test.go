@@ -2,6 +2,7 @@ package memoryassembly
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -10,6 +11,14 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/memorystore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sqliteutil"
 )
+
+type maintenanceDreamAnalyzer struct{}
+
+func (maintenanceDreamAnalyzer) AnalyzeDream(context.Context, []memorystore.Episode) (memorystore.DreamAnalysis, error) {
+	return memorystore.DreamAnalysis{
+		Text: "## Maintenance reflection\n\nReuse the verified task workflow.", Model: "maintenance-model",
+	}, nil
+}
 
 func TestMaintenanceEnabledAndScheduleDerivation(t *testing.T) {
 	cfg := runtimecfg.DefaultRuntimeConfig()
@@ -63,6 +72,203 @@ func TestMaintenanceCoreRebuildScheduleIsOptInAndUsesConfiguredInterval(t *testi
 	}
 	if schedule.coreRebuildInterval != 3*time.Minute {
 		t.Fatalf("core rebuild interval = %s, want 3m", schedule.coreRebuildInterval)
+	}
+}
+
+func TestMaintenanceDreamingScheduleIsOptInAndUsesConfiguredInterval(t *testing.T) {
+	config := runtimecfg.DefaultRuntimeConfig()
+	config.Memory.Generation.Enabled = false
+	config.Memory.Generation.TurnDigest.Enabled = false
+	config.Memory.Consolidation.Enabled = false
+	config.Memory.Retention.Enabled = false
+	config.Memory.Freshness.Enabled = false
+	config.Memory.Injection.RecallTrace.RetentionDays = 0
+	config.Memory.Feedback.ExposureRetentionDays = 0
+	config.Memory.Dreaming = runtimecfg.MemoryDreamingConfig{
+		Enabled: true, Interval: 3 * time.Minute, Limit: 12, MaxTokens: 640,
+		Shadow: true, RetentionDays: 14,
+	}
+
+	options := MaintenanceOptions{Runtime: &memoryruntime.Runtime{}, Config: config}
+	schedule := deriveMaintenanceSchedule(options)
+	if !MaintenanceEnabled(options) {
+		t.Fatal("enabled Dreaming must start maintenance")
+	}
+	if !schedule.dreamingEnabled {
+		t.Fatal("Dreaming scheduler was not derived")
+	}
+	if schedule.dreamingInterval != 3*time.Minute || schedule.dreamingLimit != 12 ||
+		schedule.dreamingMaxTokens != 640 || !schedule.dreamingShadow ||
+		schedule.dreamingRetentionDays != 14 {
+		t.Fatalf("dreaming schedule = %+v", schedule)
+	}
+}
+
+func TestRunDreamingStageCreatesOneProposedPatchAndCoalesces(t *testing.T) {
+	ctx := context.Background()
+	store, err := memorystore.New(memorystore.Config{
+		Root: t.TempDir(), Mode: "on", ProjectKey: "maintenance-dreaming",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	for _, taskID := range []string{"dream-a", "dream-b"} {
+		if _, err := store.CreateEpisode(ctx, memorystore.EpisodeInput{
+			TaskID: taskID, SessionID: "dream-session",
+			Problem: "recurring maintenance problem", Result: "resolved",
+			Outcome:        memorystore.EpisodeOutcomeSuccess,
+			SourceEventIDs: []string{"dream-event-" + taskID},
+			EndedAt:        time.Now().UTC(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := RunDreamingStage(ctx, store, 10, 800, false, 30, nil); err != nil {
+		t.Fatal(err)
+	}
+	runs, err := store.ListDreamRuns(ctx, 10)
+	if err != nil || len(runs) != 1 || runs[0].PatchCount != 1 {
+		t.Fatalf("dream runs = %+v, %v", runs, err)
+	}
+	patches, err := store.ListPatches(ctx, memorystore.PatchFilter{
+		Status: memorystore.PatchStatusProposed, Limit: 10,
+	})
+	if err != nil || len(patches) != 1 {
+		t.Fatalf("dream patches = %+v, %v", patches, err)
+	}
+
+	if err := RunDreamingStage(ctx, store, 10, 800, false, 30, nil); err != nil {
+		t.Fatal(err)
+	}
+	runs, err = store.ListDreamRuns(ctx, 10)
+	if err != nil || len(runs) != 1 {
+		t.Fatalf("coalesced dream runs = %+v, %v", runs, err)
+	}
+	patches, err = store.ListPatches(ctx, memorystore.PatchFilter{
+		Status: memorystore.PatchStatusProposed, Limit: 10,
+	})
+	if err != nil || len(patches) != 1 {
+		t.Fatalf("coalesced dream patches = %+v, %v", patches, err)
+	}
+
+	if _, err := store.RejectPatch(ctx, patches[0].ID, "operator", "not useful"); err != nil {
+		t.Fatal(err)
+	}
+	if err := RunDreamingStage(ctx, store, 10, 800, false, 30, nil); err != nil {
+		t.Fatal(err)
+	}
+	runs, err = store.ListDreamRuns(ctx, 10)
+	if err != nil || len(runs) != 1 {
+		t.Fatalf("source-hash dedupe after rejection = %+v, %v", runs, err)
+	}
+}
+
+func TestRunDreamingStageShadowRecordsPreviewWithoutPatch(t *testing.T) {
+	ctx := context.Background()
+	store, err := memorystore.New(memorystore.Config{
+		Root: t.TempDir(), Mode: "on", ProjectKey: "maintenance-dreaming-shadow",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	for _, taskID := range []string{"shadow-a", "shadow-b"} {
+		if _, err := store.CreateEpisode(ctx, memorystore.EpisodeInput{
+			TaskID: taskID, SessionID: "shadow-session",
+			Problem: "shadow maintenance problem", Outcome: memorystore.EpisodeOutcomeSuccess,
+			SourceEventIDs: []string{"shadow-event-" + taskID}, EndedAt: time.Now().UTC(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := RunDreamingStage(ctx, store, 10, 800, true, 30, maintenanceDreamAnalyzer{}); err != nil {
+		t.Fatal(err)
+	}
+	runs, err := store.ListDreamRuns(ctx, 10)
+	if err != nil || len(runs) != 1 || runs[0].PatchCount != 0 ||
+		!strings.Contains(runs[0].ReflectionText, "verified task workflow") {
+		t.Fatalf("shadow dream runs = %+v, %v", runs, err)
+	}
+	patches, err := store.ListPatches(ctx, memorystore.PatchFilter{Limit: 10})
+	if err != nil || len(patches) != 0 {
+		t.Fatalf("shadow dream patches = %+v, %v", patches, err)
+	}
+}
+
+func TestMaintenanceDreamingSchedulerRunsBoundedWorker(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store, err := memorystore.New(memorystore.Config{
+		Root: t.TempDir(), Mode: "on", ProjectKey: "maintenance-dreaming-loop",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	for _, taskID := range []string{"loop-a", "loop-b"} {
+		if _, err := store.CreateEpisode(ctx, memorystore.EpisodeInput{
+			TaskID: taskID, SessionID: "loop-session",
+			Problem: "periodic dream problem", Result: "resolved",
+			Outcome:        memorystore.EpisodeOutcomeSuccess,
+			SourceEventIDs: []string{"loop-event-" + taskID},
+			EndedAt:        time.Now().UTC(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	config := runtimecfg.DefaultRuntimeConfig()
+	config.Memory.Generation.Enabled = false
+	config.Memory.Generation.TurnDigest.Enabled = false
+	config.Memory.Consolidation.Enabled = false
+	config.Memory.Retention.Enabled = false
+	config.Memory.Freshness.Enabled = false
+	config.Memory.Injection.RecallTrace.RetentionDays = 0
+	config.Memory.Feedback.ExposureRetentionDays = 0
+	config.Memory.Dreaming = runtimecfg.MemoryDreamingConfig{
+		Enabled: true, Interval: 10 * time.Millisecond, Limit: 10, MaxTokens: 800,
+	}
+
+	stageEvents := make(chan string, 4)
+	runtime := &memoryruntime.Runtime{
+		Store: store, Config: memoryruntime.Config{Mode: "on"},
+		DreamAnalyzer: maintenanceDreamAnalyzer{},
+	}
+	stop := StartMaintenance(ctx, MaintenanceOptions{
+		Runtime: runtime, Config: config,
+		OwnerID:            "maintenance-dream-owner",
+		OwnerRetryInterval: 5 * time.Millisecond,
+		OnStage: func(stage, result string) {
+			if stage == "dreaming" {
+				stageEvents <- result
+			}
+		},
+	})
+	defer stop()
+
+	select {
+	case result := <-stageEvents:
+		if result != "ok" {
+			t.Fatalf("dreaming stage result = %q", result)
+		}
+		stop()
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for automatic Dreaming")
+	}
+
+	runs, err := store.ListDreamRuns(context.Background(), 10)
+	if err != nil || len(runs) != 1 || runs[0].PatchCount != 1 {
+		t.Fatalf("automatic dream runs = %+v, %v", runs, err)
+	}
+	patches, err := store.ListPatches(context.Background(), memorystore.PatchFilter{
+		Status: memorystore.PatchStatusProposed, Limit: 10,
+	})
+	if err != nil || len(patches) != 1 ||
+		patches[0].ProposedMetadata["dream_model"] != "maintenance-model" {
+		t.Fatalf("automatic dream patch = %+v, %v", patches, err)
 	}
 }
 

@@ -58,6 +58,11 @@ func TestExtractionDiagnosticsAreBoundedIdempotentAndProjectScoped(t *testing.T)
 	store, err := New(Config{Root: t.TempDir(), Mode: "on", ProjectKey: "project-a"})
 	require.NoError(t, err)
 	defer store.Close()
+	_, err = store.EnsureJob(context.Background(), MemoryJob{
+		ID: "job-evidence", Kind: "phase1_extract", JobKey: "evidence-job",
+		ProjectKey: "project-a",
+	})
+	require.NoError(t, err)
 
 	diagnostic := ExtractionDiagnostic{
 		ProjectKey: "project-a",

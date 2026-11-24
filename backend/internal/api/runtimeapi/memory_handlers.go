@@ -107,6 +107,10 @@ type memoryRecordDTO struct {
 	SourceKind      string                    `json:"source_kind"`
 	SourceSessionID string                    `json:"source_session_id,omitempty"`
 	SourceTurnID    string                    `json:"source_turn_id,omitempty"`
+	TrustLevel      string                    `json:"trust_level,omitempty"`
+	TrustReason     string                    `json:"trust_reason,omitempty"`
+	TrustedAt       string                    `json:"trusted_at,omitempty"`
+	FeedbackScore   float64                   `json:"feedback_score,omitempty"`
 	SourceRefs      []string                  `json:"source_refs,omitempty"`
 	Revision        int64                     `json:"revision"`
 	CreatedAt       string                    `json:"created_at,omitempty"`
@@ -364,13 +368,14 @@ func (h *Handler) GetMemoryStatus(w http.ResponseWriter, r *http.Request) {
 	if h.runtimeConfig != nil {
 		configuredMode = strings.ToLower(strings.TrimSpace(h.runtimeConfig.Memory.Mode))
 	}
-	runtimeErr := h.MemoryRuntimeBootError()
+	runtime := h.MemoryRuntimeForWorkspace(workspace)
+	runtimeErr := h.memoryRuntimeBootErrorForWorkspace(workspace)
 	switch configuredMode {
 	case "", "off":
 		response.MemoryRuntimeState = "off"
 		response.MemoryRuntimeReason = "mode_off"
 	case "shadow", "on":
-		if runtime := h.MemoryRuntime(); runtime != nil {
+		if runtime != nil {
 			response.MemoryRuntimeState = "active"
 			response.MemoryRuntimeReason = "runtime_active"
 		} else if runtimeErr != "" {
@@ -415,7 +420,7 @@ func (h *Handler) GetMemoryStatus(w http.ResponseWriter, r *http.Request) {
 		response.CaptureExtractionEnabled = h.runtimeConfig.Memory.Maintenance.CaptureExtraction.Enabled
 		response.JobDeadlineRepairEnabled = h.runtimeConfig.Memory.Maintenance.JobDeadlineRepair.Enabled
 	}
-	if rt := h.MemoryRuntime(); rt != nil {
+	if rt := runtime; rt != nil {
 		response.MemoryRuntimePresent = true
 		response.MemoryRuntimeWorkspace = rt.Config.Workspace
 		if workspacePathsEqual(workspace, rt.Config.Workspace) {
@@ -483,13 +488,18 @@ func (h *Handler) ListMemoryRecords(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "scope currently supports only project"))
 		return
 	}
-	status := strings.TrimSpace(r.URL.Query().Get("status"))
-	switch memorystore.Status(strings.ToLower(status)) {
-	case "", memorystore.StatusCandidate, memorystore.StatusActive,
-		memorystore.StatusSuperseded, memorystore.StatusDeleted, memorystore.StatusExpired:
-	default:
-		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "invalid memory status"))
-		return
+	statusValues := memoryQueryValues(r.URL.Query()["status"])
+	statuses := make([]memorystore.Status, 0, len(statusValues))
+	for _, statusText := range statusValues {
+		status := memorystore.Status(strings.ToLower(strings.TrimSpace(statusText)))
+		switch status {
+		case memorystore.StatusCandidate, memorystore.StatusActive,
+			memorystore.StatusSuperseded, memorystore.StatusDeleted, memorystore.StatusExpired:
+			statuses = append(statuses, status)
+		default:
+			h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "invalid memory status"))
+			return
+		}
 	}
 	cursor := strings.TrimSpace(r.URL.Query().Get("cursor"))
 	if cursor != "" {
@@ -518,9 +528,9 @@ func (h *Handler) ListMemoryRecords(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	query := memorystore.RecordSearchQuery{
-		Status:          memorystore.Status(strings.ToLower(status)),
-		Kind:            strings.TrimSpace(r.URL.Query().Get("kind")),
-		Tag:             strings.TrimSpace(r.URL.Query().Get("tag")),
+		Statuses:        statuses,
+		Kinds:           memoryQueryValues(r.URL.Query()["kind"]),
+		Tags:            memoryQueryValues(r.URL.Query()["tag"]),
 		Text:            firstNonEmpty(strings.TrimSpace(r.URL.Query().Get("q")), strings.TrimSpace(r.URL.Query().Get("query"))),
 		SourceKind:      strings.TrimSpace(r.URL.Query().Get("source_kind")),
 		SourceSessionID: strings.TrimSpace(r.URL.Query().Get("session_id")),
@@ -535,7 +545,7 @@ func (h *Handler) ListMemoryRecords(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	items := make([]memoryRecordDTO, 0, len(page.Items))
-	if strings.EqualFold(status, string(memorystore.StatusDeleted)) && !canViewPrivate {
+	if memoryStatusesInclude(statuses, memorystore.StatusDeleted) && !canViewPrivate {
 		h.writeError(w, http.StatusForbidden, errors.New(errors.ErrAgentPermission, "deleted memory requires admin authorization"))
 		return
 	}
@@ -1393,14 +1403,14 @@ func (h *Handler) ExtractMemory(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "failed to parse request body"))
 		return
 	}
-	if _, err := h.resolveMemoryWorkspace(r, req.WorkspacePath); err != nil {
+	workspace, err := h.resolveMemoryWorkspace(r, req.WorkspacePath)
+	if err != nil {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))
 		return
 	}
-	rt := h.MemoryRuntime()
+	rt := h.MemoryRuntimeForWorkspace(workspace)
 	if rt == nil {
-		var err error
-		rt, err = h.EnableMemoryRuntime()
+		rt, err = h.EnableMemoryRuntimeForWorkspace(workspace)
 		if err != nil {
 			h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrValidationFailed, err.Error()))
 			return
@@ -1608,11 +1618,19 @@ func (h *Handler) PreviewMemoryDigestReplay(w http.ResponseWriter, r *http.Reque
 		})
 		return
 	}
-	runtime := h.MemoryRuntime()
-	if runtime == nil {
-		h.writeError(w, http.StatusServiceUnavailable,
-			errors.New(errors.ErrValidationFailed, "memory runtime unavailable"))
+	workspace, err := h.resolveMemoryWorkspace(r, "")
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))
 		return
+	}
+	runtime := h.MemoryRuntimeForWorkspace(workspace)
+	if runtime == nil {
+		runtime, err = h.EnableMemoryRuntimeForWorkspace(workspace)
+		if err != nil || runtime == nil {
+			h.writeError(w, http.StatusServiceUnavailable,
+				errors.New(errors.ErrValidationFailed, "memory runtime unavailable"))
+			return
+		}
 	}
 	report, err := runtime.PreviewDigestReplayRecovery(
 		r.Context(), parsePositiveIntQuery(r, "limit", 100),
@@ -1650,11 +1668,14 @@ func (h *Handler) ReplayMemoryDigest(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))
 		return
 	}
-	rt := h.MemoryRuntime()
+	rt := h.MemoryRuntimeForWorkspace(workspace)
 	if rt == nil || rt.Store == nil {
-		h.writeError(w, http.StatusServiceUnavailable,
-			errors.New(errors.ErrValidationFailed, "memory runtime unavailable"))
-		return
+		rt, err = h.EnableMemoryRuntimeForWorkspace(workspace)
+		if err != nil || rt == nil || rt.Store == nil {
+			h.writeError(w, http.StatusServiceUnavailable,
+				errors.New(errors.ErrValidationFailed, "memory runtime unavailable"))
+			return
+		}
 	}
 	if !sameWorkspacePath(workspace, rt.Config.Workspace) {
 		h.writeError(w, http.StatusConflict,
@@ -2303,23 +2324,27 @@ func (h *Handler) resolveMemoryWorkspace(r *http.Request, bodyWorkspace string) 
 			configured = cwd
 		}
 	}
-	configuredAbs, err := filepath.Abs(configured)
-	if err != nil {
-		return "", err
+	configuredAbs := canonicalMemoryWorkspacePath(configured)
+	if configuredAbs == "" {
+		return "", fmt.Errorf("active runtime workspace is not configured")
 	}
-	configuredAbs = filepath.Clean(configuredAbs)
 	if requested == "" {
 		return configuredAbs, nil
 	}
-	requestedAbs, err := filepath.Abs(requested)
-	if err != nil {
-		return "", err
+	if !filepath.IsAbs(requested) {
+		return "", fmt.Errorf("workspace_path must be an absolute path")
 	}
-	requestedAbs = filepath.Clean(requestedAbs)
+	requestedAbs := canonicalMemoryWorkspacePath(requested)
 	if !sameWorkspacePath(configuredAbs, requestedAbs) {
-		return "", fmt.Errorf("workspace_path does not match the active runtime workspace")
+		if h == nil || h.authorizeMemoryAdmin(r) != nil {
+			return "", fmt.Errorf("workspace_path does not match the active runtime workspace")
+		}
+		info, statErr := os.Stat(requestedAbs)
+		if statErr != nil || !info.IsDir() {
+			return "", fmt.Errorf("workspace_path is not an accessible directory")
+		}
 	}
-	return configuredAbs, nil
+	return requestedAbs, nil
 }
 
 func sameWorkspacePath(left, right string) bool {
@@ -2405,6 +2430,8 @@ func memoryRecordToDTO(record memorystore.Record) memoryRecordDTO {
 		Sensitivity: record.Sensitivity,
 		Pinned:      record.Pinned, RetentionClass: record.RetentionClass, SourceKind: record.SourceKind,
 		SourceSessionID: record.SourceSessionID, SourceTurnID: record.SourceTurnID,
+		TrustLevel: string(record.TrustLevel), TrustReason: record.TrustReason,
+		TrustedAt: formatMemoryTime(record.TrustedAt), FeedbackScore: record.FeedbackScore,
 		SourceRefs: append([]string(nil), record.SourceRefs...), Revision: record.Revision,
 		CreatedAt: formatMemoryTime(record.CreatedAt), UpdatedAt: formatMemoryTime(record.UpdatedAt),
 		LastUsedAt: formatMemoryTime(record.LastUsedAt), UseCount: record.UseCount,
@@ -2449,4 +2476,37 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// memoryQueryValues accepts both repeated query parameters
+// (?kind=decision&kind=fact) and comma-separated values (?kind=decision,fact).
+// Empty and duplicate values are removed so the HTTP surface has the same
+// bounded multi-value semantics as the CLI and memory_search tool.
+func memoryQueryValues(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		for _, part := range strings.Split(value, ",") {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+			key := strings.ToLower(part)
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			result = append(result, part)
+		}
+	}
+	return result
+}
+
+func memoryStatusesInclude(statuses []memorystore.Status, want memorystore.Status) bool {
+	for _, status := range statuses {
+		if status == want {
+			return true
+		}
+	}
+	return false
 }

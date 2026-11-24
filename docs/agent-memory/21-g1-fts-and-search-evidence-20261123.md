@@ -15,12 +15,13 @@
 - `2404cd83`：`RecordPage.SearchBackend` 记录实际检索路径（fts5/like_fallback/recent/as_of/legacy_jsonl），FTS 无结果降级到 LIKE 时不再误标为 fts5。
 - `0443f6ad`：`RecordSearchQuery`/`RecordFilter` 支持多 status/kind/tags；SQL 使用 IN 与 `json_each` 全标签匹配，legacy JSONL 同样生效。
 - `5d972874`：`memory_search` 工具接线多值 statuses/kinds/tags（数组或逗号分隔）。
+- 2026-11-23 增量（工作区）：HTTP `status`/`kind`/`tag` 支持重复参数与逗号值；CLI 本地/结构化/runtime-server list/search 支持 `--kind`/`--tag`；FTS `listRecordsFTS` 应用 `Statuses`/`Kinds`/`Tags`；新增 `TestMemoryCrossSurfaceSameCorpus` 验证 HTTP/CLI/tool 同一 corpus 返回同一记录集合。
 
 未关闭原因：
 
 1. 注入候选裁剪已提交并有 450/1k/10k/100k 证据；
-2. 统一 SearchRecords 目前仍是单 status/kind/tag；多状态、多 kind/tags 结构化过滤尚未接入（G2 scope 字段已落地）；
-3. CLI/HTTP/tool 使用同一 store 方法已通过定向测试，但还没有一个跨三端同一 corpus 的端到端证据包；
+2. HTTP/CLI 多 status/kind/tag 已接线；更完整的 scope 组合仍需补齐；
+3. HTTP/CLI/tool 三端同一 corpus 已有跨端测试（`TestMemoryCrossSurfaceSameCorpus`），但尚无独立质量语料证据包；
 4. 三端同一 corpus 的端到端质量证据仍缺；win7compat 已用独立 modfile/tag 验证。
 
 ---
@@ -174,14 +175,14 @@ win7compat 不走 `ext/fts5` 注册，而由 pinned driver 的内嵌 Wasm SQLite
 | 自动抽取记忆在 CLI/HTTP/tool 可见 | ✅ | 现有 source-kind/active 测试通过 |
 | 精确标识符/CJK/路径/函数名/版本号 | ✅（store 层） | `TestMemoryFTSExactIdentifierAndCJKRSearch` |
 | 注入路径不全表加载 + 基准 | ✅ | 候选数有界（<=300），1k/10k/100k 为 2.61/2.94/9.54 ms/op，covering index + 无临时排序 |
-| 多 status/kind/tags 与 scope 过滤 | 🟡 | G2 scope 已落地；store-level 多值与 `memory_search` 工具已接线，HTTP/CLI 多值参数尚未接线 |
-| 三端同一 corpus 端到端证据 | 🟡 | 定向测试通过；尚无单一 corpus 证据包 |
+| 多 status/kind/tags 与 scope 过滤 | 🟡 | G2 scope 已落地；store-level、tool、HTTP/CLI 的 status/kind/tags 多值已接线；完整 scope 组合仍待补 |
+| 三端同一 corpus 端到端证据 | ✅（功能接线） | `TestMemoryCrossSurfaceSameCorpus` 使用同一临时 corpus 验证 HTTP/CLI/tool 返回同一集合；质量语料/独立证据包仍待补 |
 
 ---
 
 ## 4. 后续
 
 1. 补 why-not 截断证据；
-2. 将多 status/kind/tags 接到 HTTP/CLI 参数（store-level 与 tool 已完成）；
-3. 建立 CLI/HTTP/tool 同一 corpus 的端到端测试；
+2. 补完整 scope 组合；
+3. 将跨端 same-corpus 测试扩展到质量语料/独立证据包；
 4. 上述完成后才可关闭 G1。

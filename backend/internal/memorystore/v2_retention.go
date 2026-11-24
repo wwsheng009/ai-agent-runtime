@@ -206,7 +206,7 @@ WHERE id = ? AND project_key = ? AND revision = ?
 				if err != nil {
 					return result, err
 				}
-				if err := appendCurrentRecordVersionTx(ctx, tx, item.id, s.cfg.ProjectKey,
+				if err := s.appendCurrentRecordVersionTx(ctx, tx, item.id, s.cfg.ProjectKey,
 					"system:retention", "retention class reclassified", "retention", eventID); err != nil {
 					return result, err
 				}
@@ -433,7 +433,7 @@ WHERE id = ? AND project_key = ? AND revision = ? AND status IN ('candidate', 'a
 		if err != nil {
 			return 0, err
 		}
-		if err := appendCurrentRecordVersionTx(ctx, tx, item.id, s.cfg.ProjectKey,
+		if err := s.appendCurrentRecordVersionTx(ctx, tx, item.id, s.cfg.ProjectKey,
 			"system:retention", "retention "+reason, "update", eventID); err != nil {
 			return 0, err
 		}

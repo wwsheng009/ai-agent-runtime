@@ -17,9 +17,9 @@ func (s *Store) HasTurnDigestsForSession(ctx context.Context, sessionID string) 
 	var exists bool
 	err = db.QueryRowContext(ctx, `
 SELECT EXISTS(
-  SELECT 1 FROM memory_turn_digests WHERE project_key = ? AND session_id = ?
+  SELECT 1 FROM memory_turn_digests WHERE tenant_id = ? AND project_key = ? AND session_id = ?
 )
-`, s.cfg.ProjectKey, strings.TrimSpace(sessionID)).Scan(&exists)
+`, s.tenantID(), s.cfg.ProjectKey, strings.TrimSpace(sessionID)).Scan(&exists)
 	if err != nil {
 		return false, fmt.Errorf("memorystore: check turn digest coverage: %w", err)
 	}
@@ -47,12 +47,12 @@ func (s *Store) ListTurnDigestRollupSessions(ctx context.Context, projectKey, af
 	rows, err := db.QueryContext(ctx, `
 SELECT project_key, session_id, COUNT(1), MIN(digest_seq), MAX(digest_seq)
 FROM memory_turn_digests
-WHERE project_key = ? AND session_id > ? AND status = 'done'
+WHERE tenant_id = ? AND project_key = ? AND session_id > ? AND status = 'done'
   AND rollup_status IN ('pending', 'failed')
 GROUP BY project_key, session_id
 ORDER BY session_id ASC
 LIMIT ?
-`, projectKey, strings.TrimSpace(afterSessionID), limit)
+`, s.tenantID(), projectKey, strings.TrimSpace(afterSessionID), limit)
 	if err != nil {
 		return nil, fmt.Errorf("memorystore: list rollup recovery sessions: %w", err)
 	}

@@ -145,11 +145,17 @@ func ApplyMemoryOptions(options map[string]interface{}, cfg runtimecfg.MemoryCon
 	options["memory_injection_mode"] = strings.ToLower(strings.TrimSpace(cfg.Injection.Mode))
 	options["memory_pinned_budget_ratio"] = cfg.Injection.PinnedBudgetRatio
 	options["memory_stage_split"] = cfg.Injection.StageSplit
+	options["memory_injection_extended_preset"] = cfg.Injection.ExtendedPreset
+	options["memory_injection_budget_core"] = cfg.Injection.Budgets.Core
+	options["memory_injection_budget_task"] = cfg.Injection.Budgets.Task
+	options["memory_injection_budget_retrieved"] = cfg.Injection.Budgets.Retrieved
+	options["memory_injection_budget_procedure"] = cfg.Injection.Budgets.Procedure
+	options["memory_injection_budget_reference"] = cfg.Injection.Budgets.Reference
 	if cfg.Injection.MaxItems > 0 {
 		options["context_max_project_memory"] = cfg.Injection.MaxItems
 	}
-	if cfg.Injection.TokenBudget > 0 {
-		options["context_project_memory_tokens"] = cfg.Injection.TokenBudget
+	if budget := cfg.Injection.EffectiveTokenBudget(); budget > 0 {
+		options["context_project_memory_tokens"] = budget
 	}
 	options["memory_citation_enabled"] = cfg.Feedback.CitationEnabled
 	options["memory_exposure_sampling"] = cfg.Feedback.ExposureSampling

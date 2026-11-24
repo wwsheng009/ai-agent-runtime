@@ -77,6 +77,21 @@ func tryExecuteRuntimeServerControlCommand(session *ChatSession, command string)
 	}
 }
 
+func addChatMemoryFilterQuery(values url.Values, filters chatMemoryFilterOptions) {
+	if values == nil {
+		return
+	}
+	if filters.SourceKind != "" {
+		values.Set("source_kind", filters.SourceKind)
+	}
+	for _, kind := range filters.Kinds {
+		values.Add("kind", kind)
+	}
+	for _, tag := range filters.Tags {
+		values.Add("tag", tag)
+	}
+}
+
 func remoteDebugSupervisionWatchdog(command string) bool {
 	fields := strings.Fields(strings.ToLower(extractCommandArgument(command)))
 	if len(fields) < 2 || fields[0] != "supervision" {
@@ -428,40 +443,30 @@ func executeRemoteMemoryCommand(session *ChatSession, command string) CommandRes
 		}
 		return commandTextResult(remoteJSONText(response))
 	case "list", "ls", "recent", "records":
-		rest, sourceKind, valid := parseChatMemorySourceKindOption(strings.Join(args[1:], " "))
+		limit, filters, valid := parseChatMemoryListArgs(strings.Join(args[1:], " "))
 		if !valid {
-			return commandErrorResult(fmt.Errorf("用法: /memory list [n] [--source-kind <kind>]"))
+			return commandErrorResult(fmt.Errorf("用法: /memory list [n] [--source-kind <kind>] [--kind <kind>]... [--tag <tag>]..."))
 		}
-		limit := 20
-		if token := strings.TrimSpace(firstToken(strings.Join(rest, " "))); token != "" {
-			if n, parseErr := strconv.Atoi(token); parseErr == nil && n > 0 {
-				limit = n
-			}
-		}
-		if limit > 200 {
-			limit = 200
+		if _, err := strconv.Atoi(strings.TrimSpace(firstToken(strings.Join(args[1:], " ")))); err != nil {
+			limit = 20
 		}
 		values := url.Values{}
 		values.Set("limit", strconv.Itoa(limit))
-		if sourceKind != "" {
-			values.Set("source_kind", sourceKind)
-		}
+		addChatMemoryFilterQuery(values, filters)
 		var response map[string]interface{}
 		if _, err := caller.doRuntimeServerJSON(context.Background(), session, http.MethodGet, "/api/runtime/memory/records", values.Encode(), nil, &response); err != nil {
 			return commandErrorResult(fmt.Errorf("读取 server memory 失败: %w", err))
 		}
 		return commandTextResult(remoteJSONText(response))
 	case "search", "find", "query":
-		query, sourceKind, valid := parseChatMemorySearchArgs(strings.Join(args[1:], " "))
+		query, filters, valid := parseChatMemorySearchArgs(strings.Join(args[1:], " "))
 		if !valid {
-			return commandErrorResult(fmt.Errorf("用法: /memory search <query> [--source-kind <kind>]"))
+			return commandErrorResult(fmt.Errorf("用法: /memory search <query> [--source-kind <kind>] [--kind <kind>]... [--tag <tag>]..."))
 		}
 		values := url.Values{}
 		values.Set("q", query)
 		values.Set("limit", "20")
-		if sourceKind != "" {
-			values.Set("source_kind", sourceKind)
-		}
+		addChatMemoryFilterQuery(values, filters)
 		var response map[string]interface{}
 		if _, err := caller.doRuntimeServerJSON(context.Background(), session, http.MethodGet, "/api/runtime/memory/records", values.Encode(), nil, &response); err != nil {
 			return commandErrorResult(fmt.Errorf("搜索 server memory 失败: %w", err))

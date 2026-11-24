@@ -20,6 +20,7 @@ type Runtime struct {
 	Source           SessionSource
 	Extractor        Extractor
 	WindowSummarizer WindowSummarizer
+	DreamAnalyzer    memorystore.DreamAnalyzer
 	TaskCompletions  TaskCompletionConsumer
 	Modes            SessionModeReader
 	Config           Config
@@ -31,6 +32,19 @@ type Runtime struct {
 
 	digestStatsMu sync.Mutex
 	digestStats   DigestStats
+}
+
+// RunDreaming executes one bounded Dreaming pass, preferring the configured
+// model-backed analyzer and falling back inside memorystore when it is absent
+// or unusable.
+func (r *Runtime) RunDreaming(ctx context.Context, opts memorystore.DreamRunOptions) (memorystore.DreamRun, error) {
+	if r == nil || r.Store == nil {
+		return memorystore.DreamRun{}, fmt.Errorf("memoryruntime: Dreaming store is not configured")
+	}
+	if opts.Analyzer == nil {
+		opts.Analyzer = r.DreamAnalyzer
+	}
+	return r.Store.RunDreamPipeline(ctx, opts)
 }
 
 const maxSourceEvidenceQuoteRunes = 1200

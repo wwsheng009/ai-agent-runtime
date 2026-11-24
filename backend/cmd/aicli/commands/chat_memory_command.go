@@ -20,8 +20,8 @@ import (
 //	/memory add <text>          append a durable project note
 //	/memory note <text>         alias of add
 //	/memory flush <text>        alias of add
-//	/memory list [n] [--source-kind <kind>] list recent active memory records
-//	/memory search <query> [--source-kind <kind>] keyword search
+//	/memory list [n] [--source-kind <kind>] [--kind <kind>]... [--tag <tag>]... list recent active memory records
+//	/memory search <query> [--source-kind <kind>] [--kind <kind>]... [--tag <tag>]... keyword search
 func handleMemoryCommand(session *ChatSession, command string) bool {
 	if session == nil {
 		fmt.Println("错误: 当前没有活动会话")
@@ -65,47 +65,45 @@ func handleMemoryCommand(session *ChatSession, command string) bool {
 		return false
 
 	case "list", "ls", "recent":
-		limit, sourceKind, valid := parseChatMemoryListArgs(rest)
+		limit, filters, valid := parseChatMemoryListArgs(rest)
 		if !valid {
-			fmt.Println("用法: /memory list [n] [--source-kind <kind>]")
+			fmt.Println("用法: /memory list [n] [--source-kind <kind>] [--kind <kind>]... [--tag <tag>]...")
 			return false
 		}
-		notes, err := store.ListWithOptions(memorystore.ListOptions{Limit: limit, SourceKind: sourceKind})
+		page, err := store.SearchRecords(context.Background(), filters.query("", limit))
 		if err != nil {
 			fmt.Printf("错误: 读取项目记忆失败: %v\n", err)
 			return false
 		}
-		if len(notes) == 0 {
+		if len(page.Items) == 0 {
 			fmt.Println("项目记忆为空。使用 /memory add <text> 写入。")
 			return false
 		}
-		header := fmt.Sprintf("最近 %d 条项目记忆（root=%s）:", len(notes), store.Root())
-		if sourceKind != "" {
-			header = fmt.Sprintf("最近 %d 条项目记忆（source_kind=%s root=%s）:",
-				len(notes), safeMemorySourceKindLabel(sourceKind), store.Root())
+		header := fmt.Sprintf("最近 %d 条项目记忆（root=%s）:", len(page.Items), store.Root())
+		if label := chatMemoryFilterLabel(filters); label != "" {
+			header = fmt.Sprintf("最近 %d 条项目记忆（%s root=%s）:", len(page.Items), label, store.Root())
 		}
 		fmt.Println(header)
-		for i, note := range notes {
+		for i, hit := range page.Items {
+			record := hit.Record
 			tags := ""
-			if len(note.Tags) > 0 {
-				tags = " [" + strings.Join(note.Tags, ", ") + "]"
+			if len(record.Tags) > 0 {
+				tags = " [" + strings.Join(record.Tags, ", ") + "]"
 			}
-			if source := safeMemorySourceKindLabel(note.Source); source != "" && !strings.EqualFold(source, "manual") {
+			if source := safeMemorySourceKindLabel(record.SourceKind); source != "" && !strings.EqualFold(source, "manual") {
 				tags = " [source=" + source + "]" + tags
 			}
-			fmt.Printf("%d. %s%s\n   %s\n", i+1, note.ID, tags, summarizeMemoryNote(note.Text, 200))
+			fmt.Printf("%d. %s%s\n   %s\n", i+1, record.ID, tags, summarizeMemoryNote(record.Text, 200))
 		}
 		return false
 
 	case "search", "find", "query":
-		query, sourceKind, valid := parseChatMemorySearchArgs(rest)
+		query, filters, valid := parseChatMemorySearchArgs(rest)
 		if !valid {
-			fmt.Println("用法: /memory search <query> [--source-kind <kind>]")
+			fmt.Println("用法: /memory search <query> [--source-kind <kind>] [--kind <kind>]... [--tag <tag>]...")
 			return false
 		}
-		result, err := store.SearchRecords(context.Background(), memorystore.RecordSearchQuery{
-			Text: query, SourceKind: sourceKind, Limit: 8,
-		})
+		result, err := store.SearchRecords(context.Background(), filters.query(query, 8))
 		if err != nil {
 			fmt.Printf("错误: 搜索项目记忆失败: %v\n", err)
 			return false
@@ -114,11 +112,10 @@ func handleMemoryCommand(session *ChatSession, command string) bool {
 			fmt.Printf("未找到与 %q 匹配的项目记忆。\n", query)
 			return false
 		}
-		if sourceKind == "" {
+		if label := chatMemoryFilterLabel(filters); label == "" {
 			fmt.Printf("项目记忆搜索 %q → %d 条:\n", query, len(result.Items))
 		} else {
-			fmt.Printf("项目记忆搜索 %q（source_kind=%s）→ %d 条:\n",
-				query, safeMemorySourceKindLabel(sourceKind), len(result.Items))
+			fmt.Printf("项目记忆搜索 %q（%s）→ %d 条:\n", query, label, len(result.Items))
 		}
 		for i, hit := range result.Items {
 			record := hit.Record
@@ -178,7 +175,7 @@ func handleMemoryCommand(session *ChatSession, command string) bool {
 		return false
 
 	default:
-		fmt.Println("用法: /memory [status|add <text>|list [n] [--source-kind <kind>]|search <query> [--source-kind <kind>]|history <id>|rollback <id> <version> --expected-revision <n> --reason <text> --yes]")
+		fmt.Println("用法: /memory [status|add <text>|list [n] [--source-kind <kind>] [--kind <kind>]... [--tag <tag>]...|search <query> [--source-kind <kind>] [--kind <kind>]... [--tag <tag>]...|history <id>|rollback <id> <version> --expected-revision <n> --reason <text> --yes]")
 		return false
 	}
 }
@@ -190,10 +187,49 @@ func renderLegacyMemoryResult(session *ChatSession, result CommandResult) {
 	_ = renderChatCommandResult(session, result, true)
 }
 
-func parseChatMemoryListArgs(rest string) (limit int, sourceKind string, valid bool) {
-	tokens, sourceKind, valid := parseChatMemorySourceKindOption(rest)
+type chatMemoryFilterOptions struct {
+	SourceKind string
+	Kinds      []string
+	Tags       []string
+}
+
+func (o chatMemoryFilterOptions) query(text string, limit int) memorystore.RecordSearchQuery {
+	return memorystore.RecordSearchQuery{
+		Status:     memorystore.StatusActive,
+		Text:       strings.TrimSpace(text),
+		SourceKind: o.SourceKind,
+		Kinds:      append([]string(nil), o.Kinds...),
+		Tags:       append([]string(nil), o.Tags...),
+		Limit:      limit,
+	}
+}
+
+func chatMemoryFilterLabel(filters chatMemoryFilterOptions) string {
+	parts := make([]string, 0, 3)
+	if filters.SourceKind != "" {
+		parts = append(parts, "source_kind="+safeMemorySourceKindLabel(filters.SourceKind))
+	}
+	if len(filters.Kinds) > 0 {
+		safe := make([]string, 0, len(filters.Kinds))
+		for _, kind := range filters.Kinds {
+			safe = append(safe, safeMemorySourceKindLabel(kind))
+		}
+		parts = append(parts, "kinds="+strings.Join(safe, ","))
+	}
+	if len(filters.Tags) > 0 {
+		safe := make([]string, 0, len(filters.Tags))
+		for _, tag := range filters.Tags {
+			safe = append(safe, safeMemorySourceKindLabel(tag))
+		}
+		parts = append(parts, "tags="+strings.Join(safe, ","))
+	}
+	return strings.Join(parts, " ")
+}
+
+func parseChatMemoryListArgs(rest string) (limit int, filters chatMemoryFilterOptions, valid bool) {
+	tokens, filters, valid := parseChatMemoryFilterOptions(rest)
 	if !valid {
-		return 0, "", false
+		return 0, chatMemoryFilterOptions{}, false
 	}
 	limit = 10
 	if len(tokens) > 0 {
@@ -204,48 +240,129 @@ func parseChatMemoryListArgs(rest string) (limit int, sourceKind string, valid b
 	if limit > 200 {
 		limit = 200
 	}
-	return limit, sourceKind, true
+	return limit, filters, true
 }
 
-func parseChatMemorySearchArgs(rest string) (query, sourceKind string, valid bool) {
-	tokens, sourceKind, valid := parseChatMemorySourceKindOption(rest)
+func parseOptionalMemoryLimit(rest string, fallback int) (int, bool) {
+	rest = strings.TrimSpace(rest)
+	if rest == "" {
+		return fallback, true
+	}
+	value, err := strconv.Atoi(strings.TrimSpace(firstToken(rest)))
+	if err != nil || value <= 0 || value > 500 {
+		return 0, false
+	}
+	return value, true
+}
+
+func parseChatMemorySearchArgs(rest string) (query string, filters chatMemoryFilterOptions, valid bool) {
+	tokens, filters, valid := parseChatMemoryFilterOptions(rest)
 	if !valid || len(tokens) == 0 {
-		return "", "", false
+		return "", chatMemoryFilterOptions{}, false
 	}
 	query = strings.TrimSpace(strings.Join(tokens, " "))
-	return query, sourceKind, query != ""
+	return query, filters, query != ""
 }
 
-// parseChatMemorySourceKindOption removes the optional source-kind selector
-// from tokenized slash-command arguments. It rejects a missing or repeated
-// option rather than silently widening a filtered query.
-func parseChatMemorySourceKindOption(rest string) (tokens []string, sourceKind string, valid bool) {
+// parseChatMemoryFilterOptions removes the bounded --source-kind, --kind and
+// --tag selectors from tokenized slash-command arguments. --kind/--tag may be
+// repeated or comma-separated; --source-kind remains single-valued. A missing
+// value or repeated source-kind is rejected rather than silently widening a
+// filtered query.
+func parseChatMemoryFilterOptions(rest string) (tokens []string, filters chatMemoryFilterOptions, valid bool) {
 	fields := splitChatCommandFields(rest)
 	tokens = make([]string, 0, len(fields))
 	valid = true
-	specified := false
+	sourceSpecified := false
 	for i := 0; i < len(fields); i++ {
 		field := fields[i]
 		value := ""
-		if strings.EqualFold(field, "--source-kind") {
+		lower := strings.ToLower(field)
+		switch {
+		case strings.EqualFold(field, "--source-kind"):
 			if i+1 >= len(fields) {
-				return nil, "", false
+				return nil, chatMemoryFilterOptions{}, false
 			}
 			i++
 			value = strings.TrimSpace(fields[i])
-		} else if strings.HasPrefix(strings.ToLower(field), "--source-kind=") {
+			if value == "" || sourceSpecified {
+				return nil, chatMemoryFilterOptions{}, false
+			}
+			filters.SourceKind = strings.ToLower(value)
+			sourceSpecified = true
+		case strings.HasPrefix(lower, "--source-kind="):
 			value = strings.TrimSpace(field[len("--source-kind="):])
-		} else {
+			if value == "" || sourceSpecified {
+				return nil, chatMemoryFilterOptions{}, false
+			}
+			filters.SourceKind = strings.ToLower(value)
+			sourceSpecified = true
+		case strings.EqualFold(field, "--kind"):
+			if i+1 >= len(fields) {
+				return nil, chatMemoryFilterOptions{}, false
+			}
+			i++
+			var ok bool
+			filters.Kinds, ok = appendChatMemoryFilterValues(filters.Kinds, fields[i])
+			if !ok {
+				return nil, chatMemoryFilterOptions{}, false
+			}
+		case strings.HasPrefix(lower, "--kind="):
+			var ok bool
+			filters.Kinds, ok = appendChatMemoryFilterValues(filters.Kinds, field[len("--kind="):])
+			if !ok {
+				return nil, chatMemoryFilterOptions{}, false
+			}
+		case strings.EqualFold(field, "--tag"):
+			if i+1 >= len(fields) {
+				return nil, chatMemoryFilterOptions{}, false
+			}
+			i++
+			var ok bool
+			filters.Tags, ok = appendChatMemoryFilterValues(filters.Tags, fields[i])
+			if !ok {
+				return nil, chatMemoryFilterOptions{}, false
+			}
+		case strings.HasPrefix(lower, "--tag="):
+			var ok bool
+			filters.Tags, ok = appendChatMemoryFilterValues(filters.Tags, field[len("--tag="):])
+			if !ok {
+				return nil, chatMemoryFilterOptions{}, false
+			}
+		default:
 			tokens = append(tokens, field)
+		}
+	}
+	return tokens, filters, true
+}
+
+func appendChatMemoryFilterValues(dst []string, raw string) ([]string, bool) {
+	nonEmpty := false
+	have := make(map[string]struct{}, len(dst))
+	for _, value := range dst {
+		have[strings.ToLower(strings.TrimSpace(value))] = struct{}{}
+	}
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.ToLower(strings.TrimSpace(part))
+		if part == "" {
 			continue
 		}
-		if value == "" || specified {
-			return nil, "", false
+		nonEmpty = true
+		if _, ok := have[part]; ok {
+			continue
 		}
-		sourceKind = strings.ToLower(value)
-		specified = true
+		have[part] = struct{}{}
+		dst = append(dst, part)
 	}
-	return tokens, sourceKind, true
+	return dst, nonEmpty
+}
+
+// parseChatMemorySourceKindOption is kept for callers that only need the
+// legacy single source-kind selector. New code should use
+// parseChatMemoryFilterOptions so kind/tag filters do not get dropped.
+func parseChatMemorySourceKindOption(rest string) (tokens []string, sourceKind string, valid bool) {
+	tokens, filters, valid := parseChatMemoryFilterOptions(rest)
+	return tokens, filters.SourceKind, valid
 }
 
 func printProjectMemoryStatus(store *memorystore.Store) {

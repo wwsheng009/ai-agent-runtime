@@ -128,6 +128,7 @@ type MemoryConfig struct {
 	Redaction     MemoryRedactionConfig     `yaml:"redaction" json:"redaction"`
 	Tools         MemoryToolsConfig         `yaml:"tools" json:"tools"`
 	Maintenance   MemoryMaintenanceConfig   `yaml:"maintenance" json:"maintenance"`
+	Dreaming      MemoryDreamingConfig      `yaml:"dreaming" json:"dreaming"`
 }
 
 type MemoryMaintenanceConfig struct {
@@ -168,6 +169,21 @@ type MemoryGenerationConfig struct {
 	ReasoningEffort      string                 `yaml:"reasoningEffort" json:"reasoningEffort"`
 	MaxRecordsPerSession int                    `yaml:"maxRecordsPerSession" json:"maxRecordsPerSession"`
 	TurnDigest           MemoryTurnDigestConfig `yaml:"turnDigest" json:"turnDigest"`
+}
+
+// MemoryDreamingConfig controls the bounded automatic Dreaming scheduler.
+// Dreaming only creates reviewable patches; it never applies them. The
+// scheduler is opt-in and coalesces while a previous Dreaming patch is pending.
+type MemoryDreamingConfig struct {
+	Enabled         bool          `yaml:"enabled" json:"enabled"`
+	Interval        time.Duration `yaml:"interval" json:"interval"`
+	Limit           int           `yaml:"limit" json:"limit"`
+	MaxTokens       int           `yaml:"maxTokens" json:"maxTokens"`
+	Shadow          bool          `yaml:"shadow" json:"shadow"`
+	RetentionDays   int           `yaml:"retentionDays" json:"retentionDays"`
+	Provider        string        `yaml:"provider" json:"provider"`
+	Model           string        `yaml:"model" json:"model"`
+	ReasoningEffort string        `yaml:"reasoningEffort" json:"reasoningEffort"`
 }
 
 // MemoryTurnDigestConfig controls the runtime turn outbox introduced for
@@ -1331,6 +1347,10 @@ func DefaultRuntimeConfig() *RuntimeConfig {
 					Enabled: false, Interval: 24 * time.Hour,
 					MaxRecords: 32, MaxUsageRows: 200, TokenBudget: 1200,
 				},
+			},
+			Dreaming: MemoryDreamingConfig{
+				Enabled: false, Interval: 24 * time.Hour, Limit: 20, MaxTokens: 800,
+				RetentionDays: 30,
 			},
 			Injection: MemoryInjectionConfig{
 				Enabled:     true,

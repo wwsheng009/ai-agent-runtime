@@ -197,6 +197,7 @@ type localChatRuntimeHost struct {
 	// memoryMaintenanceShared means MemoryRuntime is owned by the process-wide
 	// workspace registry; its store/ticker must not be closed by this host.
 	memoryMaintenanceShared bool
+	memoryTaskBridgeOnce    sync.Once
 	supervisionWake         *supervision.WakeConsumer
 	supervisionConfig       supervision.Config
 	// executionSupervisor / executionSupervisorStop 是 P0-4 的 CLI 本地
@@ -4081,6 +4082,9 @@ func (h *localChatRuntimeHost) bindTeamLifecycleEvents() {
 		h.Orchestrator.Events = events
 	}
 	events.Subscribe("", h.publishTeamLifecycleEvent)
+	if h.BaseSession != nil {
+		h.bindMemoryTaskCompletionEvents(h.BaseSession.SessionManager)
+	}
 }
 
 func (h *localChatRuntimeHost) publishTeamLifecycleEvent(event team.TeamEvent) {

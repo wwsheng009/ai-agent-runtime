@@ -913,9 +913,10 @@ type SkillsRuntimeQuotaPolicies struct {
 }
 
 type SkillsRuntimeScopeBinding struct {
-	TenantID  string `yaml:"tenant_id" mapstructure:"tenant_id"`
-	ProjectID string `yaml:"project_id" mapstructure:"project_id"`
-	UserID    string `yaml:"user_id" mapstructure:"user_id"`
+	TenantID    string `yaml:"tenant_id" mapstructure:"tenant_id"`
+	ProjectID   string `yaml:"project_id" mapstructure:"project_id"`
+	WorkspaceID string `yaml:"workspace_id" mapstructure:"workspace_id"`
+	UserID      string `yaml:"user_id" mapstructure:"user_id"`
 }
 
 // ResolveRoot resolves a named profile to a root path when configured.
@@ -962,12 +963,14 @@ type SkillsRuntimeConfig struct {
 	ScopeResolverEnabled   bool                                 `yaml:"scope_resolver_enabled" mapstructure:"scope_resolver_enabled" env:"SKILLS_RUNTIME_SCOPE_RESOLVER_ENABLED"`
 	TenantHeaders          []string                             `yaml:"tenant_headers" mapstructure:"tenant_headers"`
 	ProjectHeaders         []string                             `yaml:"project_headers" mapstructure:"project_headers"`
+	WorkspaceHeaders       []string                             `yaml:"workspace_headers" mapstructure:"workspace_headers"`
 	UserHeaders            []string                             `yaml:"user_headers" mapstructure:"user_headers"`
 	RoleHeaders            []string                             `yaml:"role_headers" mapstructure:"role_headers"`
 	JWTClaimsEnabled       bool                                 `yaml:"jwt_claims_enabled" mapstructure:"jwt_claims_enabled" env:"SKILLS_RUNTIME_JWT_CLAIMS_ENABLED"`
 	JWTSecret              string                               `yaml:"jwt_secret" mapstructure:"jwt_secret" env:"SKILLS_RUNTIME_JWT_SECRET"`
 	TenantClaims           []string                             `yaml:"tenant_claims" mapstructure:"tenant_claims"`
 	ProjectClaims          []string                             `yaml:"project_claims" mapstructure:"project_claims"`
+	WorkspaceClaims        []string                             `yaml:"workspace_claims" mapstructure:"workspace_claims"`
 	UserClaims             []string                             `yaml:"user_claims" mapstructure:"user_claims"`
 	RoleClaims             []string                             `yaml:"role_claims" mapstructure:"role_claims"`
 	AdminRoles             []string                             `yaml:"admin_roles" mapstructure:"admin_roles"`

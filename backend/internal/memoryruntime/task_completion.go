@@ -8,6 +8,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/memoryredact"
+	"github.com/wwsheng009/ai-agent-runtime/internal/memorystore"
 )
 
 const (
@@ -24,12 +25,8 @@ func (r *Runtime) HandleTaskCompletionEvent(
 	ctx context.Context, event TaskCompletionEvent,
 ) (TaskCompletionResult, error) {
 	result := TaskCompletionResult{Trigger: TriggerTaskCompletion}
-	if r == nil || !r.enabled() || r.Config.GenerationDisabled {
-		result.Reason = "memory_or_generation_disabled"
-		return result, nil
-	}
-	if r.Config.GenerationTrigger != string(TriggerTaskCompletion) {
-		result.Reason = "task_completion_trigger_not_selected"
+	if r == nil || !r.enabled() {
+		result.Reason = "memory_disabled"
 		return result, nil
 	}
 	if r.Store == nil || r.Source == nil {
@@ -42,7 +39,8 @@ func (r *Runtime) HandleTaskCompletionEvent(
 	if err != nil {
 		return result, err
 	}
-	if strings.TrimSpace(event.TenantID) != "" {
+	storeScope := r.Store.ScopeContext()
+	if strings.TrimSpace(event.TenantID) != "" && strings.TrimSpace(event.TenantID) != storeScope.TenantID {
 		return result, fmt.Errorf("memoryruntime: task-completion tenant scope is not configured")
 	}
 	projectKey := strings.TrimSpace(event.ProjectKey)
@@ -54,11 +52,18 @@ func (r *Runtime) HandleTaskCompletionEvent(
 	if err != nil {
 		return result, fmt.Errorf("memoryruntime: task-completion session identity unavailable")
 	}
-	if session.SessionGeneration <= 0 || session.SessionGeneration != event.SessionGeneration {
+	if session.SessionGeneration <= 0 {
+		result.Reason = "session_generation_unavailable"
+		return result, nil
+	}
+	if event.SessionGeneration <= 0 {
+		event.SessionGeneration = session.SessionGeneration
+	}
+	if session.SessionGeneration != event.SessionGeneration {
 		result.Reason = "session_generation_mismatch"
 		return result, nil
 	}
-	if ok, reason := r.eligible(ctx, session, TriggerTaskCompletion); !ok {
+	if ok, reason := r.taskCompletionEligible(ctx, session); !ok {
 		result.Reason = "session_ineligible:" + reason
 		return result, nil
 	}
@@ -80,7 +85,7 @@ func normalizeTaskCompletionEvent(event TaskCompletionEvent) (TaskCompletionEven
 	event.ProjectKey = strings.TrimSpace(event.ProjectKey)
 	event.TeamID = strings.TrimSpace(event.TeamID)
 	if event.SourceEventID == "" || event.TaskID == "" || event.SessionID == "" ||
-		event.ProjectKey == "" || event.TeamID == "" || event.SessionGeneration <= 0 {
+		event.ProjectKey == "" {
 		return TaskCompletionEvent{}, fmt.Errorf("memoryruntime: task-completion event identity is incomplete")
 	}
 	if event.EndedAt.IsZero() {
@@ -155,6 +160,65 @@ func normalizeTaskCompletionEvent(event TaskCompletionEvent) (TaskCompletionEven
 		event.Actions = event.Actions[:maxTaskCompletionSourceIDs]
 	}
 	return event, nil
+}
+
+// taskCompletionEligible is deliberately narrower than the extraction
+// eligibility gate. Task Episodes are deterministic operational memories and
+// must remain recordable for subagent/team sessions and recently active work;
+// they do not depend on idle thresholds or the LLM generation trigger.
+func (r *Runtime) taskCompletionEligible(ctx context.Context, session SessionRef) (bool, string) {
+	if r == nil || !r.enabled() {
+		return false, "mode_off"
+	}
+	if session.Ephemeral {
+		return false, "ephemeral"
+	}
+	if r.Modes != nil {
+		mode, err := r.Modes.GetSessionMode(ctx, session.ID)
+		if err != nil {
+			return false, "session_mode_error"
+		}
+		if mode == memorystore.SessionModeDisabled || mode == memorystore.SessionModePolluted {
+			return false, "session_mode_" + string(mode)
+		}
+	}
+	if r.Config.Workspace != "" {
+		if strings.TrimSpace(session.WorkspacePath) == "" {
+			if r.Config.RequireWorkspaceMatch {
+				return false, "workspace_missing"
+			}
+		} else if !sameWorkspace(r.Config.Workspace, session.WorkspacePath) {
+			return false, "workspace_mismatch"
+		}
+	}
+	return true, ""
+}
+
+// StoreTaskCompletionConsumer is the durable G4 Episode boundary. It creates
+// one candidate Episode from a validated task-terminal event; consolidation or
+// explicit review may later promote it.
+type StoreTaskCompletionConsumer struct {
+	Store *memorystore.Store
+}
+
+func NewStoreTaskCompletionConsumer(store *memorystore.Store) *StoreTaskCompletionConsumer {
+	return &StoreTaskCompletionConsumer{Store: store}
+}
+
+func (c *StoreTaskCompletionConsumer) ConsumeTaskCompletion(ctx context.Context, event TaskCompletionEvent) error {
+	if c == nil || c.Store == nil {
+		return fmt.Errorf("memoryruntime: task-completion store consumer is not configured")
+	}
+	_, err := c.Store.CreateEpisode(ctx, memorystore.EpisodeInput{
+		TenantID: event.TenantID, ProjectKey: event.ProjectKey,
+		TaskID: event.TaskID, SessionID: event.SessionID,
+		Problem: event.Problem, Actions: append([]string(nil), event.Actions...),
+		Result: event.Result, FailureReason: event.FailureReason,
+		Outcome:   memorystore.EpisodeOutcome(event.Outcome),
+		StartedAt: event.StartedAt, EndedAt: event.EndedAt,
+		SourceEventIDs: append([]string(nil), event.SourceEventIDs...),
+	})
+	return err
 }
 
 func sanitizeTaskCompletionText(text string) string {

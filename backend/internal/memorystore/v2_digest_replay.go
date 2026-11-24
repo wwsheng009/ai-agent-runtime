@@ -63,10 +63,10 @@ func (s *Store) ListDigestReplayCandidateIDs(ctx context.Context, limit int) ([]
 	rows, err := db.QueryContext(ctx, `
 SELECT id
 FROM memory_turn_digests
-WHERE project_key = ? AND status IN ('pending', 'processing', 'failed', 'deferred')
+WHERE tenant_id = ? AND project_key = ? AND status IN ('pending', 'processing', 'failed', 'deferred')
 ORDER BY digest_seq ASC
 LIMIT ?
-`, s.cfg.ProjectKey, limit)
+`, s.tenantID(), s.cfg.ProjectKey, limit)
 	if err != nil {
 		return nil, fmt.Errorf("memorystore: list digest replay candidates: %w", err)
 	}
@@ -213,7 +213,7 @@ func (s *Store) replayDigest(
 		result.Reason = "capture_generation_binding"
 		return result, replayDigestClassificationError(result, nil, dryRun)
 	}
-	if err := checkSessionPurgeGenerationTx(ctx, tx, row.ProjectKey,
+	if err := checkSessionPurgeGenerationTx(ctx, tx, s.tenantID(), row.ProjectKey,
 		row.SessionID, row.SessionGeneration); err != nil {
 		if errors.Is(err, ErrSessionPurgeGenerationMismatch) {
 			result.Classification = DigestReplayStaleGeneration
@@ -225,7 +225,7 @@ func (s *Store) replayDigest(
 		return result, err
 	}
 
-	processed, err := hasTurnCaptureOutputReceiptTx(ctx, tx, row, capture)
+	processed, err := hasTurnCaptureOutputReceiptTx(ctx, tx, s.tenantID(), row, capture)
 	if err != nil {
 		return result, err
 	}
@@ -238,13 +238,13 @@ func (s *Store) replayDigest(
 
 	var job *digestReplayJob
 	if row.ProcessJobID != "" {
-		job, err = loadDigestReplayJobByIDTx(ctx, tx, row.ProjectKey, row.ProcessJobID)
+		job, err = loadDigestReplayJobByIDTx(ctx, tx, s.tenantID(), row.ProjectKey, row.ProcessJobID)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return result, fmt.Errorf("memorystore: read digest replay job: %w", err)
 		}
 	}
 	if job == nil {
-		job, err = loadDigestReplayJobByKeyTx(ctx, tx, row.ProjectKey, jobKey)
+		job, err = loadDigestReplayJobByKeyTx(ctx, tx, s.tenantID(), row.ProjectKey, jobKey)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return result, fmt.Errorf("memorystore: read digest replay job key: %w", err)
 		}
@@ -273,7 +273,7 @@ func (s *Store) replayDigest(
 			// The stable job key found a pending job, but the digest link was
 			// lost. Repair only that durable identity link; do not reset the
 			// job or invoke extraction.
-			if err := linkDigestReplayJobTx(ctx, tx, row, job.ID); err != nil {
+			if err := linkDigestReplayJobTx(ctx, tx, s.tenantID(), row, job.ID); err != nil {
 				return result, err
 			}
 			if err := tx.Commit(); err != nil {
@@ -293,12 +293,12 @@ func (s *Store) replayDigest(
 		return result, nil
 	}
 
-	job, err = insertDigestReplayJobTx(ctx, tx, capture, jobKey)
+	job, err = insertDigestReplayJobTx(ctx, tx, s.tenantID(), capture, jobKey)
 	if err != nil {
 		return result, err
 	}
 	result.JobID = job.ID
-	if err := linkDigestReplayJobTx(ctx, tx, row, job.ID); err != nil {
+	if err := linkDigestReplayJobTx(ctx, tx, s.tenantID(), row, job.ID); err != nil {
 		return result, err
 	}
 	if _, err := tx.ExecContext(ctx, `
@@ -333,9 +333,10 @@ SELECT d.id, d.project_key, COALESCE(d.session_id, ''), d.session_generation,
        COALESCE(g.turn_id, ''), COALESCE(g.generation, 0), COALESCE(d.scope, '')
 FROM memory_turn_digests d
 LEFT JOIN memory_turn_capture_generations g
-  ON g.project_key = d.project_key AND g.capture_receipt_id = d.capture_receipt_id
-WHERE d.project_key = ? AND d.id = ?
-`, s.cfg.ProjectKey, digestID).Scan(
+  ON g.tenant_id = d.tenant_id AND g.project_key = d.project_key
+     AND g.capture_receipt_id = d.capture_receipt_id
+WHERE d.tenant_id = ? AND d.project_key = ? AND d.id = ?
+`, s.tenantID(), s.cfg.ProjectKey, digestID).Scan(
 		&row.ID, &row.ProjectKey, &row.SessionID, &row.SessionGeneration,
 		&row.TurnID, &row.MessageSeqStart, &row.MessageSeqEnd,
 		&row.CaptureReceiptID, &row.SourceRevision, &row.RangeHash,
@@ -383,6 +384,7 @@ func turnCaptureIdentityMatches(row digestReplayRow, capture TurnCapture) bool {
 func hasTurnCaptureOutputReceiptTx(
 	ctx context.Context,
 	tx *sql.Tx,
+	tenantID string,
 	row digestReplayRow,
 	capture TurnCapture,
 ) (bool, error) {
@@ -392,8 +394,8 @@ func hasTurnCaptureOutputReceiptTx(
 SELECT session_id, turn_id, capture_receipt_id, digest_id, job_id,
        source_revision, range_hash
 FROM memory_turn_output_receipts
-WHERE project_key = ? AND capture_receipt_id = ?
-`, row.ProjectKey, row.CaptureReceiptID).Scan(
+WHERE tenant_id = ? AND project_key = ? AND capture_receipt_id = ?
+`, tenantID, row.ProjectKey, row.CaptureReceiptID).Scan(
 		&sessionID, &turnID, &receiptID, &digestID, &jobID, &revision, &rangeHash,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -413,29 +415,29 @@ WHERE project_key = ? AND capture_receipt_id = ?
 func loadDigestReplayJobByIDTx(
 	ctx context.Context,
 	tx *sql.Tx,
-	projectKey, jobID string,
+	tenantID, projectKey, jobID string,
 ) (*digestReplayJob, error) {
 	return scanDigestReplayJob(tx.QueryRowContext(ctx, `
 SELECT id, kind, job_key, status, COALESCE(session_id, ''), session_generation,
        COALESCE(capture_receipt_id, ''), source_start_seq, source_end_seq,
        source_revision, COALESCE(source_hash, ''), COALESCE(lease_until, '')
 FROM memory_jobs
-WHERE project_key = ? AND id = ?
-`, projectKey, jobID))
+WHERE tenant_id = ? AND project_key = ? AND id = ?
+`, tenantID, projectKey, jobID))
 }
 
 func loadDigestReplayJobByKeyTx(
 	ctx context.Context,
 	tx *sql.Tx,
-	projectKey, jobKey string,
+	tenantID, projectKey, jobKey string,
 ) (*digestReplayJob, error) {
 	return scanDigestReplayJob(tx.QueryRowContext(ctx, `
 SELECT id, kind, job_key, status, COALESCE(session_id, ''), session_generation,
        COALESCE(capture_receipt_id, ''), source_start_seq, source_end_seq,
        source_revision, COALESCE(source_hash, ''), COALESCE(lease_until, '')
 FROM memory_jobs
-WHERE project_key = ? AND kind = 'phase1_extract/v2' AND scope = 'project' AND job_key = ?
-`, projectKey, jobKey))
+WHERE tenant_id = ? AND project_key = ? AND kind = 'phase1_extract/v2' AND scope = 'project' AND job_key = ?
+`, tenantID, projectKey, jobKey))
 }
 
 func scanDigestReplayJob(scanner interface{ Scan(...interface{}) error }) (*digestReplayJob, error) {
@@ -467,6 +469,7 @@ func digestReplayJobIdentityMatches(job digestReplayJob, capture TurnCapture) bo
 func insertDigestReplayJobTx(
 	ctx context.Context,
 	tx *sql.Tx,
+	tenantID string,
 	capture TurnCapture,
 	jobKey string,
 ) (*digestReplayJob, error) {
@@ -478,19 +481,22 @@ INSERT INTO memory_jobs (
     max_attempts, retry_at, last_error, input_watermark, created_at, updated_at,
     session_id, session_generation, capture_receipt_id, source_start_seq,
     source_end_seq, source_revision, source_hash, available_at, deadline_at,
-    heartbeat_at, deferred_until, dead_letter_at, dead_letter_reason, repair_only
+    heartbeat_at, deferred_until, dead_letter_at, dead_letter_reason, repair_only,
+    tenant_id, scope_kind, scope_key
 ) VALUES (?, 'phase1_extract/v2', ?, 'project', ?, 'pending', ?, 0, 3,
-           NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, 0)
+           NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, 0,
+           ?, 'project', ?)
 ON CONFLICT(kind, scope, project_key, job_key) DO NOTHING
 `, jobID, jobKey, capture.ProjectKey, JobPriorityPhase1ExtractV2,
 		capture.ID, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano),
 		capture.SessionID, capture.SessionGeneration, capture.ID,
 		capture.MessageSeqStart, capture.MessageSeqEnd, capture.CanonicalRevision,
 		capture.RangeHash, now.Format(time.RFC3339Nano),
-		now.Add(DefaultMemoryJobTimeout).Format(time.RFC3339Nano)); err != nil {
+		now.Add(DefaultMemoryJobTimeout).Format(time.RFC3339Nano),
+		tenantID, capture.ProjectKey); err != nil {
 		return nil, fmt.Errorf("memorystore: insert digest replay job: %w", err)
 	}
-	job, err := loadDigestReplayJobByKeyTx(ctx, tx, capture.ProjectKey, jobKey)
+	job, err := loadDigestReplayJobByKeyTx(ctx, tx, tenantID, capture.ProjectKey, jobKey)
 	if err != nil {
 		return nil, fmt.Errorf("memorystore: resolve digest replay job: %w", err)
 	}
@@ -500,16 +506,16 @@ ON CONFLICT(kind, scope, project_key, job_key) DO NOTHING
 	return job, nil
 }
 
-func linkDigestReplayJobTx(ctx context.Context, tx *sql.Tx, row digestReplayRow, jobID string) error {
+func linkDigestReplayJobTx(ctx context.Context, tx *sql.Tx, tenantID string, row digestReplayRow, jobID string) error {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	res, err := tx.ExecContext(ctx, `
 UPDATE memory_turn_digests
 SET status = 'pending', process_job_id = ?, last_error = NULL,
     processed_at = NULL, rollup_status = 'pending',
     rollup_window_id = NULL, rolled_up_at = NULL, updated_at = ?
-WHERE project_key = ? AND id = ? AND capture_receipt_id = ?
+WHERE tenant_id = ? AND project_key = ? AND id = ? AND capture_receipt_id = ?
   AND status IN ('pending', 'processing', 'failed')
-`, jobID, now, row.ProjectKey, row.ID, row.CaptureReceiptID)
+`, jobID, now, tenantID, row.ProjectKey, row.ID, row.CaptureReceiptID)
 	if err != nil {
 		return fmt.Errorf("memorystore: link digest replay job: %w", err)
 	}

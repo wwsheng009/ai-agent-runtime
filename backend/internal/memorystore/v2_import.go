@@ -96,8 +96,8 @@ func (s *Store) ImportJSONL(ctx context.Context, body []byte, dryRun bool) (Impo
 		}
 		var existing int
 		if err := tx.QueryRowContext(ctx, `
-SELECT COUNT(1) FROM memory_entries WHERE id = ? AND project_key = ?
-`, record.ID, s.cfg.ProjectKey).Scan(&existing); err != nil {
+SELECT COUNT(1) FROM memory_entries WHERE id = ? AND tenant_id = ? AND project_key = ?
+`, record.ID, s.tenantID(), s.cfg.ProjectKey).Scan(&existing); err != nil {
 			return result, err
 		}
 		if existing > 0 {
@@ -123,9 +123,9 @@ SELECT COUNT(1) FROM memory_entries WHERE id = ? AND project_key = ?
 		if record.Status == StatusDeleted {
 			if _, err := tx.ExecContext(ctx, `
 INSERT OR IGNORE INTO memory_suppressions (
-    id, scope, project_key, content_hash, reason, source_memory_id, created_at, metadata_json
-) VALUES (?, ?, ?, ?, 'deleted', ?, ?, '{}')
-`, "sup_"+uuid.NewString(), string(record.Scope), record.ProjectKey, record.ContentHash,
+    id, tenant_id, scope, project_key, content_hash, reason, source_memory_id, created_at, metadata_json
+) VALUES (?, ?, ?, ?, ?, 'deleted', ?, ?, '{}')
+`, "sup_"+uuid.NewString(), record.TenantID, string(record.Scope), record.ProjectKey, record.ContentHash,
 				record.ID, now.Format(time.RFC3339Nano)); err != nil {
 				return result, err
 			}
@@ -147,11 +147,11 @@ INSERT OR IGNORE INTO memory_suppressions (
 		}
 		res, err := tx.ExecContext(ctx, `
 INSERT OR IGNORE INTO memory_versions (
-    id, memory_id, version, project_key, scope_kind, scope_key, record_json,
+    id, memory_id, version, tenant_id, project_key, scope_kind, scope_key, record_json,
     changed_by, change_reason, change_type, source_event_id, valid_from,
     valid_until, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-`, version.ID, version.MemoryID, version.Version, version.ProjectKey,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`, version.ID, version.MemoryID, version.Version, version.Record.TenantID, version.ProjectKey,
 			string(version.ScopeKind), version.ScopeKey, string(recordJSON),
 			version.ChangedBy, version.ChangeReason, version.ChangeType,
 			nullableString(version.SourceEventID), nullableTime(version.ValidFrom),
@@ -250,13 +250,26 @@ func parseImportJSONL(body []byte, result ImportResult) (parsedImport, ImportRes
 
 func (s *Store) normalizeImportedRecord(record Record, now time.Time) (Record, error) {
 	sourceProjectKey := strings.TrimSpace(record.ProjectKey)
+	sourceTenantID := strings.TrimSpace(record.TenantID)
 	if sourceProjectKey != "" && sourceProjectKey != s.cfg.ProjectKey {
 		if record.Metadata == nil {
 			record.Metadata = map[string]interface{}{}
 		}
 		record.Metadata["imported_from_project_key"] = sourceProjectKey
 	}
+	if sourceTenantID != "" && sourceTenantID != s.tenantID() {
+		if record.Metadata == nil {
+			record.Metadata = map[string]interface{}{}
+		}
+		record.Metadata["imported_from_tenant_id"] = sourceTenantID
+	}
 	record.ProjectKey = s.cfg.ProjectKey
+	record.TenantID = s.tenantID()
+	record.ScopeKind = ScopeProject
+	record.ScopeKey = s.cfg.ProjectKey
+	record.OwnerID = ""
+	record.AgentID = ""
+	record.TaskID = ""
 	if record.Scope == "" {
 		record.Scope = ScopeProject
 	}
@@ -362,13 +375,26 @@ func (s *Store) normalizeImportedVersion(version RecordVersion, now time.Time) (
 			version.MemoryID, version.Version)
 	}
 	sourceProjectKey := firstNonEmpty(strings.TrimSpace(version.ProjectKey), strings.TrimSpace(record.ProjectKey))
+	sourceTenantID := strings.TrimSpace(record.TenantID)
 	if sourceProjectKey != "" && sourceProjectKey != s.cfg.ProjectKey {
 		if record.Metadata == nil {
 			record.Metadata = map[string]interface{}{}
 		}
 		record.Metadata["imported_from_project_key"] = sourceProjectKey
 	}
+	if sourceTenantID != "" && sourceTenantID != s.tenantID() {
+		if record.Metadata == nil {
+			record.Metadata = map[string]interface{}{}
+		}
+		record.Metadata["imported_from_tenant_id"] = sourceTenantID
+	}
 	record.ProjectKey = s.cfg.ProjectKey
+	record.TenantID = s.tenantID()
+	record.ScopeKind = ScopeProject
+	record.ScopeKey = s.cfg.ProjectKey
+	record.OwnerID = ""
+	record.AgentID = ""
+	record.TaskID = ""
 	if record.Scope == "" {
 		record.Scope = ScopeProject
 	}
@@ -506,9 +532,9 @@ func (s *Store) importSummary(ctx context.Context, summary Summary) (bool, error
 	var existing int
 	if err := db.QueryRowContext(ctx, `
 SELECT COUNT(1) FROM memory_summaries
-WHERE project_key = ? AND summary_kind = 'long_term' AND status = 'active'
+WHERE tenant_id = ? AND project_key = ? AND summary_kind = 'long_term' AND status = 'active'
   AND freshness_status = 'fresh' AND content_hash = ?
-`, s.cfg.ProjectKey, hex.EncodeToString(sum[:])).Scan(&existing); err != nil {
+`, s.tenantID(), s.cfg.ProjectKey, hex.EncodeToString(sum[:])).Scan(&existing); err != nil {
 		return false, err
 	}
 	if existing > 0 {

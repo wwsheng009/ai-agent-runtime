@@ -580,12 +580,14 @@ func applySkillsRuntimePoliciesToTarget(
 		Enabled:          cfg.ScopeResolverEnabled,
 		TenantHeaders:    append([]string(nil), cfg.TenantHeaders...),
 		ProjectHeaders:   append([]string(nil), cfg.ProjectHeaders...),
+		WorkspaceHeaders: append([]string(nil), cfg.WorkspaceHeaders...),
 		UserHeaders:      append([]string(nil), cfg.UserHeaders...),
 		RoleHeaders:      append([]string(nil), cfg.RoleHeaders...),
 		JWTClaimsEnabled: cfg.JWTClaimsEnabled,
 		JWTSecret:        strings.TrimSpace(cfg.JWTSecret),
 		TenantClaims:     append([]string(nil), cfg.TenantClaims...),
 		ProjectClaims:    append([]string(nil), cfg.ProjectClaims...),
+		WorkspaceClaims:  append([]string(nil), cfg.WorkspaceClaims...),
 		UserClaims:       append([]string(nil), cfg.UserClaims...),
 		RoleClaims:       append([]string(nil), cfg.RoleClaims...),
 		AdminRoles:       append([]string(nil), cfg.AdminRoles...),
@@ -751,9 +753,10 @@ func buildSkillsScopeBindingsForHotReload(
 	bindings := make(map[string]runtimeapi.UsageScope, len(configured))
 	for key, value := range configured {
 		bindings[key] = runtimeapi.UsageScope{
-			TenantID:  value.TenantID,
-			ProjectID: value.ProjectID,
-			UserID:    value.UserID,
+			TenantID:    value.TenantID,
+			ProjectID:   value.ProjectID,
+			WorkspaceID: value.WorkspaceID,
+			UserID:      value.UserID,
 		}
 	}
 	return bindings

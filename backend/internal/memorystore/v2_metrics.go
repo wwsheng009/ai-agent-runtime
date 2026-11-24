@@ -24,6 +24,11 @@ type MemoryMetrics struct {
 	RecallTraceCount   int            `json:"recall_trace_count"`
 	RecallTokenTotal   int            `json:"recall_token_total"`
 	SummaryRebuildJobs map[string]int `json:"summary_rebuild_jobs"`
+	TrustCounts        map[string]int `json:"trust_counts,omitempty"`
+	FeedbackByKind     map[string]int `json:"feedback_by_kind,omitempty"`
+	PatchesByStatus    map[string]int `json:"patches_by_status,omitempty"`
+	DreamRunsByStatus  map[string]int `json:"dream_runs_by_status,omitempty"`
+	EntityCount        int            `json:"entity_count"`
 }
 
 func (s *Store) Metrics(ctx context.Context) (MemoryMetrics, error) {
@@ -47,9 +52,9 @@ func (s *Store) Metrics(ctx context.Context) (MemoryMetrics, error) {
 	}
 	rows, err := db.QueryContext(ctx, `
 SELECT kind, COUNT(1) FROM memory_entries
-WHERE project_key = ? AND status = 'active'
+WHERE tenant_id = ? AND project_key = ? AND status = 'active'
 GROUP BY kind ORDER BY kind
-`, s.cfg.ProjectKey)
+`, s.tenantID(), s.cfg.ProjectKey)
 	if err != nil {
 		return metrics, err
 	}
@@ -67,9 +72,9 @@ GROUP BY kind ORDER BY kind
 SELECT u.use_kind, COUNT(1), COALESCE(MAX(u.used_at), '')
 FROM memory_usage u
 JOIN memory_entries e ON e.id = u.memory_id
-WHERE e.project_key = ?
+WHERE u.tenant_id = ? AND e.tenant_id = ? AND e.project_key = ?
 GROUP BY u.use_kind
-`, s.cfg.ProjectKey)
+`, s.tenantID(), s.tenantID(), s.cfg.ProjectKey)
 	if err != nil {
 		return metrics, err
 	}
@@ -88,13 +93,14 @@ GROUP BY u.use_kind
 	}
 	_ = rows.Close()
 	_ = db.QueryRowContext(ctx, `
-SELECT COUNT(1), COALESCE(SUM(token_estimate), 0) FROM memory_recall_traces WHERE project_key = ?
-`, s.cfg.ProjectKey).Scan(&metrics.RecallTraceCount, &metrics.RecallTokenTotal)
+SELECT COUNT(1), COALESCE(SUM(token_estimate), 0) FROM memory_recall_traces
+WHERE tenant_id = ? AND project_key = ?
+`, s.tenantID(), s.cfg.ProjectKey).Scan(&metrics.RecallTraceCount, &metrics.RecallTokenTotal)
 	rows, err = db.QueryContext(ctx, `
 SELECT status, COUNT(1) FROM memory_jobs
-WHERE project_key = ? AND kind = 'summary_rebuild'
+WHERE tenant_id = ? AND project_key = ? AND kind = 'summary_rebuild'
 GROUP BY status
-`, s.cfg.ProjectKey)
+`, s.tenantID(), s.cfg.ProjectKey)
 	if err != nil {
 		return metrics, err
 	}
@@ -108,6 +114,13 @@ GROUP BY status
 		metrics.SummaryRebuildJobs[statusValue] = count
 	}
 	_ = rows.Close()
+	if extra, extraErr := s.OperationalMetrics(ctx); extraErr == nil {
+		metrics.TrustCounts = extra.TrustCounts
+		metrics.FeedbackByKind = extra.FeedbackByKind
+		metrics.PatchesByStatus = extra.PatchesByStatus
+		metrics.DreamRunsByStatus = extra.DreamRunsByStatus
+		metrics.EntityCount = extra.EntityCount
+	}
 	return metrics, rows.Err()
 }
 

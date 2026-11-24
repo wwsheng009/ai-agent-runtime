@@ -98,6 +98,9 @@ func BuildFromRuntimeConfig(opts BuildOptions) (*memoryruntime.Runtime, error) {
 		ConsolidationModel:             memoryCfg.Consolidation.Model,
 		ConsolidationProvider:          memoryCfg.Consolidation.Provider,
 		ConsolidationReasoningEffort:   memoryCfg.Consolidation.ReasoningEffort,
+		DreamingModel:                  memoryCfg.Dreaming.Model,
+		DreamingProvider:               memoryCfg.Dreaming.Provider,
+		DreamingReasoningEffort:        memoryCfg.Dreaming.ReasoningEffort,
 		CitationEnabled:                memoryCfg.Feedback.CitationEnabled,
 		ExposureSampling:               memoryCfg.Feedback.ExposureSampling,
 		ExtractionModel:                generation.Model,
@@ -128,6 +131,8 @@ func BuildFromRuntimeConfig(opts BuildOptions) (*memoryruntime.Runtime, error) {
 	source := &memoryruntime.ChatSessionSource{Manager: opts.SessionManager, UserID: opts.UserID}
 	extractor := &memoryruntime.LLMExtractor{Runtime: opts.LLMRuntime, Config: cfg}
 	runtime := memoryruntime.New(store, source, extractor, store, cfg)
+	runtime.TaskCompletions = memoryruntime.NewStoreTaskCompletionConsumer(store)
 	runtime.WindowSummarizer = &memoryruntime.LLMWindowSummarizer{Runtime: opts.LLMRuntime, Config: cfg}
+	runtime.DreamAnalyzer = &memoryruntime.LLMDreamAnalyzer{Runtime: opts.LLMRuntime, Config: cfg}
 	return runtime, nil
 }

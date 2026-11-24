@@ -402,12 +402,15 @@ func (s *Store) insertRecordSQLTxWithOptions(
 	if err := s.normalizeRecordScope(ctx, &record); err != nil {
 		return err
 	}
+	if err := normalizeRecordTrust(&record); err != nil {
+		return err
+	}
 	var suppressed int
 	if err := tx.QueryRowContext(ctx, `
 SELECT COUNT(1) FROM memory_suppressions
-WHERE scope = ? AND project_key = ? AND content_hash = ?
+WHERE tenant_id = ? AND scope = ? AND project_key = ? AND content_hash = ?
   AND (expires_at IS NULL OR expires_at = '' OR expires_at > ?)
-`, string(record.Scope), record.ProjectKey, record.ContentHash, nowText()).Scan(&suppressed); err != nil {
+`, record.TenantID, string(record.Scope), record.ProjectKey, record.ContentHash, nowText()).Scan(&suppressed); err != nil {
 		return fmt.Errorf("memorystore: check suppression: %w", err)
 	}
 	if suppressed > 0 {
@@ -435,8 +438,9 @@ INSERT INTO memory_entries (
     valid_from, valid_until, freshness_status, last_verified_at,
     revalidate_after, stale_reason, deleted_at, metadata_json,
     title, summary, canonical_id, superseded_by, archived,
-    tenant_id, owner_id, agent_id, task_id, scope_kind, scope_key
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    tenant_id, owner_id, agent_id, task_id, scope_kind, scope_key,
+    trust_level, trust_reason, trusted_at, feedback_score
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		record.ID, string(record.Scope), record.ProjectKey, record.Kind, string(record.Status),
 		record.Text, record.NormalizedText, string(tagsJSON), record.Confidence, record.Sensitivity,
@@ -451,6 +455,7 @@ INSERT INTO memory_entries (
 		nullableTime(record.DeletedAt), string(metadataJSON),
 		record.Title, record.Summary, record.CanonicalID, nullableString(record.SupersededBy), boolInt(record.Archived),
 		record.TenantID, record.OwnerID, record.AgentID, record.TaskID, string(record.ScopeKind), record.ScopeKey,
+		string(record.TrustLevel), record.TrustReason, nullableTime(record.TrustedAt), record.FeedbackScore,
 	)
 	if err != nil {
 		if isUniqueConstraint(err) {
@@ -459,6 +464,9 @@ INSERT INTO memory_entries (
 		return fmt.Errorf("memorystore: insert record: %w", err)
 	}
 	if err := insertSourceTx(ctx, tx, record, sessionID); err != nil {
+		return err
+	}
+	if err := linkRecordEntitiesTx(ctx, tx, record); err != nil {
 		return err
 	}
 	eventType := strings.TrimSpace(options.eventType)
@@ -476,7 +484,7 @@ INSERT INTO memory_entries (
 		if changeType == "" {
 			changeType = "create"
 		}
-		if err := appendCurrentRecordVersionTx(ctx, tx, record.ID, record.ProjectKey, actor, "record created", changeType, eventID); err != nil {
+		if err := s.appendCurrentRecordVersionTx(ctx, tx, record.ID, record.ProjectKey, actor, "record created", changeType, eventID); err != nil {
 			return err
 		}
 	}
@@ -714,6 +722,7 @@ func (s *Store) selectForInjectV2Internal(opts InjectOptions, diagnostic bool) (
 		records           []Record
 		diagnosticRecords []Record
 		initialDropped    []DroppedRecord
+		recallScores      map[string]float64
 	)
 	if diagnostic {
 		diagnosticRecords, err = s.loadRecordsForInjectionDiagnostics(ctx, db, 500)
@@ -725,10 +734,12 @@ func (s *Store) selectForInjectV2Internal(opts InjectOptions, diagnostic bool) (
 			return Selection{}, err
 		}
 	} else {
-		records, err = s.loadInjectableCandidates(ctx, db, opts, now)
+		var retrievalScores map[string]float64
+		records, retrievalScores, err = s.loadInjectableCandidates(ctx, db, opts, now)
 		if err != nil {
 			return Selection{}, err
 		}
+		recallScores = retrievalScores
 	}
 	mode := strings.ToLower(strings.TrimSpace(s.cfg.InjectionMode))
 	if mode != "summary" && mode != "hybrid" && mode != "notes" {
@@ -893,7 +904,9 @@ func (s *Store) selectForInjectV2Internal(opts InjectOptions, diagnostic bool) (
 		if _, exists := stableIDs[record.ID]; exists {
 			continue
 		}
-		score := scoreRecordForRecall(record, queryTokens, opts.Query, now)
+		score := scoreRecordForRecallWithRetrieval(
+			record, queryTokens, opts.Query, now, recallScores[record.ID],
+		)
 		if opts.Query != "" && score <= 0 {
 			continue
 		}
@@ -1074,7 +1087,8 @@ SELECT id, scope, project_key, kind, status, text, normalized_text, tags_json,
        created_at, updated_at, last_used_at, use_count, valid_from, valid_until,
        freshness_status, last_verified_at, revalidate_after, stale_reason,
        deleted_at, metadata_json, title, summary, canonical_id, superseded_by, archived,
-       tenant_id, owner_id, agent_id, task_id, scope_kind, scope_key
+       tenant_id, owner_id, agent_id, task_id, scope_kind, scope_key,
+       trust_level, trust_reason, trusted_at, feedback_score
  FROM memory_entries
 WHERE `+scopePredicate+`
 ORDER BY pinned DESC, use_count DESC, updated_at DESC, id ASC
@@ -1124,6 +1138,12 @@ func (s *Store) classifyInjectableRecords(ctx context.Context, db *sql.DB, recor
 			}
 		case !s.cfg.DisableSecretFilter && memoryredact.DetectSecret(record.Text) != "":
 			reason = "secret"
+		case record.TrustLevel == TrustUntrustedExternal &&
+			(strings.EqualFold(record.Kind, "procedure") ||
+				strings.EqualFold(record.Kind, "workflow") ||
+				strings.EqualFold(record.Kind, "policy") ||
+				strings.EqualFold(record.Kind, "system_policy")):
+			reason = "untrusted_external"
 		default:
 			if _, ok := suppressed[record.ContentHash]; ok {
 				reason = "suppressed"
@@ -1141,9 +1161,9 @@ func (s *Store) classifyInjectableRecords(ctx context.Context, db *sql.DB, recor
 func (s *Store) loadActiveSuppressionHashes(ctx context.Context, db *sql.DB, now time.Time) (map[string]struct{}, error) {
 	rows, err := db.QueryContext(ctx, `
 SELECT content_hash FROM memory_suppressions
-WHERE scope = ? AND project_key = ?
+WHERE tenant_id = ? AND scope = ? AND project_key = ?
   AND (expires_at IS NULL OR expires_at = '' OR expires_at > ?)
-`, string(ScopeProject), s.cfg.ProjectKey, now.UTC().Format(time.RFC3339Nano))
+`, s.tenantID(), string(ScopeProject), s.cfg.ProjectKey, now.UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return nil, err
 	}
@@ -1258,32 +1278,47 @@ const (
 
 func (s *Store) loadInjectableCandidates(
 	ctx context.Context, db *sql.DB, opts InjectOptions, now time.Time,
-) ([]Record, error) {
+) ([]Record, map[string]float64, error) {
 	_ = db // ListRecords resolves the same bounded, project-scoped database.
 	pinned, err := s.ListRecords(ctx, RecordFilter{
 		Status: StatusActive, PinnedOnly: true, Limit: maxInjectablePinnedCandidates,
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	manual, err := s.ListRecords(ctx, RecordFilter{
 		Status: StatusActive, SourceKind: "manual", Limit: maxInjectableManualCandidates,
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	recallFilter := RecordFilter{
-		Status: StatusActive, Limit: maxInjectableRecallCandidates,
-	}
+	retrievalScores := make(map[string]float64)
+	var recallItems []Record
 	if query := strings.TrimSpace(opts.Query); query != "" {
-		recallFilter.Query = query
-	}
-	recall, err := s.ListRecords(ctx, recallFilter)
-	if err != nil {
-		return nil, err
+		page, searchErr := s.SearchRecords(ctx, RecordSearchQuery{
+			Text: query, Status: StatusActive, Limit: maxInjectableRecallCandidates,
+		})
+		if searchErr != nil {
+			return nil, nil, searchErr
+		}
+		recallItems = make([]Record, 0, len(page.Items))
+		for _, hit := range page.Items {
+			recallItems = append(recallItems, hit.Record)
+			if hit.Score > retrievalScores[hit.Record.ID] {
+				retrievalScores[hit.Record.ID] = hit.Score
+			}
+		}
+	} else {
+		recall, listErr := s.ListRecords(ctx, RecordFilter{
+			Status: StatusActive, Limit: maxInjectableRecallCandidates,
+		})
+		if listErr != nil {
+			return nil, nil, listErr
+		}
+		recallItems = recall.Items
 	}
 
-	merged := make([]Record, 0, len(pinned.Items)+len(manual.Items)+len(recall.Items))
+	merged := make([]Record, 0, len(pinned.Items)+len(manual.Items)+len(recallItems))
 	seen := make(map[string]struct{}, len(merged))
 	appendRecords := func(items []Record) {
 		for _, record := range items {
@@ -1312,13 +1347,13 @@ func (s *Store) loadInjectableCandidates(
 	})
 	appendRecords(pinned.Items)
 	appendRecords(manual.Items)
-	appendRecords(recall.Items)
+	appendRecords(recallItems)
 
 	eligible, _, err := s.classifyInjectableRecords(ctx, db, merged, now)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return eligible, nil
+	return eligible, retrievalScores, nil
 }
 
 // scanInjectableRecord is the bounded projection used by the per-turn recall
@@ -1402,7 +1437,8 @@ SELECT id, scope, project_key, kind, status, text, normalized_text, tags_json,
        created_at, updated_at, last_used_at, use_count, valid_from, valid_until,
        freshness_status, last_verified_at, revalidate_after, stale_reason,
        deleted_at, metadata_json, title, summary, canonical_id, superseded_by, archived,
-       tenant_id, owner_id, agent_id, task_id, scope_kind, scope_key
+       tenant_id, owner_id, agent_id, task_id, scope_kind, scope_key,
+       trust_level, trust_reason, trusted_at, feedback_score
  FROM memory_entries
 WHERE `+scopePredicate+` AND id IN (`+strings.Join(placeholders, ", ")+`)
 `, args...)

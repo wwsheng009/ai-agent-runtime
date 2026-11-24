@@ -205,6 +205,9 @@ func formatMemoryRecord(record memorystore.Record) string {
 	if record.Pinned {
 		line += " [pinned]"
 	}
+	if trust := strings.TrimSpace(string(record.TrustLevel)); trust != "" {
+		line += " [trust=" + trust + "]"
+	}
 	if record.Freshness == memorystore.FreshnessStale {
 		line += " [possibly stale]"
 	}

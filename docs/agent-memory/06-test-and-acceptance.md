@@ -541,7 +541,7 @@ go test -race ./internal/memorystore ./internal/memoryruntime ./internal/context
 
 ### 7.1 真实模型服务联调（显式 opt-in）
 
-`TestLiveModelMemoryPipeline` 默认跳过，不会因普通单测意外调用付费服务。开启时必须显式指定配置文件、provider、model 和 reasoning；配置与凭据只读，数据库使用 `t.TempDir()`，输入仅为合成会话，不读取用户历史记忆。当前 wire 断言针对 Codex Responses 协议。
+`TestLiveModelMemoryPipeline` 默认跳过，不会因普通单测意外调用付费服务。开启时必须显式指定配置文件、provider、model 和 reasoning；配置与凭据只读，数据库使用 `t.TempDir()`，输入仅为合成会话，不读取用户历史记忆。wire 断言支持 Codex Responses 和 OpenAI Chat Completions 两种协议；前者核对 `reasoning.effort`，后者核对顶层 `reasoning_effort`。
 
 在 `backend` 目录执行（将配置路径替换为本机绝对路径；Windows 使用 `C:/...`）：
 
@@ -555,12 +555,24 @@ go test -race ./internal/memoryruntime \
   -run '^TestLiveModelMemoryPipeline$' -count=1 -v -timeout=12m
 ```
 
+magpie / OpenAI-compatible 路由（例如 `baidu-qianfan/deepseek-v4.1-flash` + `max`）：
+
+```bash
+AICLI_MEMORY_LIVE=1 \
+AICLI_MEMORY_LIVE_CONFIG="C:/Users/<user>/.aicli/config.yaml" \
+AICLI_MEMORY_LIVE_PROVIDER=magpie \
+AICLI_MEMORY_LIVE_MODEL=baidu-qianfan/deepseek-v4.1-flash \
+AICLI_MEMORY_LIVE_REASONING=max \
+go test -race ./internal/memoryruntime \
+  -run '^TestLiveModelMemoryPipeline$' -count=1 -v -timeout=12m
+```
+
 验收内容：
 
 - SQLite canonical transcript → 两个有界抽取窗口 → L0 done → 真实 L1 汇总及 L2 seed；
 - 真实项目摘要必须为 `compiler=llm_v1`，不能用 deterministic fallback 冒充真实摘要通过；
 - 保留 `C++` / `C#`、`Server 1` / `Server 2` 的身份，来源可追踪，摘要在预算内，并能被 `SelectForInjectV2` 选中；
-- 核对四次实际 HTTP 请求的 model 和 `reasoning.effort`、HTTP 200、响应 model 与 usage；不记录认证头或原始推理；
+- 核对四次实际 HTTP 请求的 model 和 reasoning 字段（`reasoning.effort` 或 `reasoning_effort`）、HTTP 200、响应 model 与 usage；不记录认证头或原始推理；
 - 重开 canonical 与 memory SQLite 后恢复既有摘要，重复 recovery/consolidation 不增加模型调用。
 
 测试调用使用有界超时且关闭自动重试；服务或结构化输出失败直接报告，不自动更换 provider/model。该用例证明一次合成数据链路，不替代 Web/终端关闭 E2E、长周期 shadow 或质量统计验收。
@@ -578,6 +590,27 @@ go test -race ./internal/memoryruntime \
 - 6 条抽取候选 + 1 条 L2 seed，7 条晋升；L1 done、pending digest 为 0；项目摘要 `compiler=llm_v1`、258 estimated tokens、召回选中 7 个 ID。
 - 重开两套 SQLite 后摘要保持一致，重复恢复/汇总的模型调用数仍为 4。服务上报合计 4592 tokens，仅指四次 memory 请求，不含独立 CLI 连通性检查。
 - 关闭 live 开关后，`memoryruntime` / `memorystore` / `memorypolicy` 全量 race 回归通过。以上为单次功能证据，不作为延迟或质量阈值。
+
+2026-11-23 实测（Windows，隔离 worktree `f6379d06`，`-race`，`magpie` / `baidu-qianfan/deepseek-v4.1-flash` / `max`；连续两次通过）：
+
+```text
+LIVE route provider=magpie protocol=openai model=baidu-qianfan/deepseek-v4.1-flash reasoning=max
+memory_extraction x2: success, usage 836 / 976 total tokens
+memory_turn_window x1: success, usage 587 total tokens
+memory_project_summary x1: success, usage 1783 total tokens
+LIVE wire verified: protocol=openai requests=4 successes=4 retries=0 model=baidu-qianfan/deepseek-v4.1-flash reasoning=max
+LIVE project summary: compiler=llm_v1 promoted=7 summary_tokens=537 injected_ids=7
+PASS in 20.36s
+```
+
+TDD 过程记录：
+
+1. 初始 live 测试硬编码 Codex 协议，magpie 路由在 provider 校验处失败（actual `openai`）。
+2. 测试改为同时核对 Codex 与 OpenAI reasoning 字段后，真实调用成功完成两次抽取和一次 L1 汇总。
+3. 最初的 magpie 摘要请求在 `max` reasoning 下（transport allowance 1100）连续返回 HTTP 502；将 summary transport allowance 提高到至少 2048（渲染仍受 `SummaryTokenBudget` 限制），并允许最多 2 次有界 502 重试后，隔离 worktree 的 `-race` 运行连续两次通过并产出 `compiler=llm_v1`。上游仍出现过偶发 502，因此不能证明 502 仅由 `max_tokens` 造成；当前可复现配置是 2048 allowance + bounded retry，且每个逻辑 stage 最终必须收到 HTTP 200。
+4. 新增 `TestSummaryModelMaxTokensLeavesReasoningHeadroom` 作为回归测试，防止后续把 reasoning 模型的输出预算压回 1200。
+
+该证据证明一次合成数据链路在指定 magpie 模型上通过，不替代 Web/终端关闭 E2E、长周期 shadow 或质量统计验收。
 
 ## 8. 阶段验收标准（Definition of Done）
 

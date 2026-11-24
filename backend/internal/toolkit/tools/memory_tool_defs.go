@@ -59,6 +59,57 @@ func NewMemoryCoreGetTool(cfg *runtimecfg.RuntimeConfig) toolkit.Tool {
 		memorySchema(map[string]interface{}{}), false)
 }
 
+func NewMemoryEpisodesTool(cfg *runtimecfg.RuntimeConfig) toolkit.Tool {
+	return newMemoryTool(cfg, "episodes", "memory_episodes",
+		"List bounded task-completion Episodes for the current project. Read-only.",
+		memorySchema(map[string]interface{}{
+			"task_id":    memoryStringProp("Optional task id filter."),
+			"session_id": memoryStringProp("Optional current-session id filter."),
+			"outcome":    memoryEnumProp("Optional Episode outcome filter.", "success", "failed", "partial", "blocked", "cancelled"),
+			"limit":      memoryIntProp("Maximum Episodes (default 20, max 100).", 1, 100),
+		}), false)
+}
+
+func NewMemoryPatchesTool(cfg *runtimecfg.RuntimeConfig) toolkit.Tool {
+	return newMemoryTool(cfg, "patches", "memory_patches",
+		"List bounded reviewable memory patches. Read-only; approval and apply remain human/operator actions.",
+		memorySchema(map[string]interface{}{
+			"status": memoryEnumProp("Optional patch status.", "proposed", "approved", "rejected", "applied", "rolled_back", "failed"),
+			"risk":   memoryEnumProp("Optional patch risk.", "low", "medium", "high"),
+			"limit":  memoryIntProp("Maximum patches (default 20, max 100).", 1, 100),
+		}), false)
+}
+
+func NewMemoryPatchReadTool(cfg *runtimecfg.RuntimeConfig) toolkit.Tool {
+	return newMemoryTool(cfg, "patch_read", "memory_patch_read",
+		"Read one reviewable memory patch and its evidence. Read-only.",
+		memorySchema(map[string]interface{}{
+			"id": memoryStringProp("Patch id, for example patch_..."),
+		}, "id"), false)
+}
+
+func NewMemoryDreamsTool(cfg *runtimecfg.RuntimeConfig) toolkit.Tool {
+	return newMemoryTool(cfg, "dreams", "memory_dreams",
+		"List bounded Dreaming runs for the current project. Read-only; running Dreaming remains operator-controlled.",
+		memorySchema(map[string]interface{}{
+			"limit": memoryIntProp("Maximum Dreaming runs (default 20, max 100).", 1, 100),
+		}), false)
+}
+
+func NewMemoryFeedbackTool(cfg *runtimecfg.RuntimeConfig) toolkit.Tool {
+	return newMemoryTool(cfg, "feedback", "memory_feedback",
+		"Record helpful/irrelevant/stale/incorrect feedback for a memory record. Stale/incorrect feedback also marks the record for revalidation.",
+		map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"id":      map[string]interface{}{"type": "string", "description": "Memory record id."},
+				"kind":    map[string]interface{}{"type": "string", "enum": []string{"helpful", "irrelevant", "stale", "incorrect"}},
+				"comment": map[string]interface{}{"type": "string", "description": "Optional bounded comment."},
+			},
+			"required": []string{"id", "kind"},
+		}, true)
+}
+
 func NewMemoryAddTool(cfg *runtimecfg.RuntimeConfig) toolkit.Tool {
 	return newMemoryTool(cfg, "add", "memory_add",
 		"Add an explicit manual project memory. Use only when the user explicitly asks to remember something.",

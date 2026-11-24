@@ -133,8 +133,15 @@ func summaryModelMaxTokens(budget int) int {
 	if budget < 256 {
 		budget = 256
 	}
-	if budget > 1200 {
-		budget = 1200
+	// Reasoning models can consume completion budget for hidden reasoning
+	// tokens. Keep the transport allowance above the rendered summary budget
+	// so a small summary budget does not turn a valid request into an upstream
+	// provider error; the rendered summary is still bounded by `budget` above.
+	if budget < 2048 {
+		budget = 2048
+	}
+	if budget > 4096 {
+		budget = 4096
 	}
 	return budget
 }

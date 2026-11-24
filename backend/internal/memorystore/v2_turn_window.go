@@ -168,14 +168,15 @@ func (s *Store) ensureTurnWindow(ctx context.Context, window TurnWindow, require
 		return TurnWindow{}, false, err
 	}
 	if err := checkTurnWindowIdentityPurgeFenceTx(ctx, tx,
-		window.ProjectKey, window.SessionID, window.SessionGeneration); err != nil {
+		s.tenantID(), window.ProjectKey, window.SessionID, window.SessionGeneration); err != nil {
 		return TurnWindow{}, false, err
 	}
 	existing, getErr := scanTurnWindow(tx.QueryRowContext(ctx, `SELECT `+turnWindowColumns+`
 FROM memory_turn_windows
-WHERE project_key = ? AND session_id = ? AND session_generation = ?
+WHERE tenant_id = ? AND project_key = ? AND session_id = ? AND session_generation = ?
   AND start_digest_seq = ? AND end_digest_seq = ?`,
-		window.ProjectKey, window.SessionID, window.SessionGeneration, window.StartDigestSeq, window.EndDigestSeq))
+		s.tenantID(), window.ProjectKey, window.SessionID, window.SessionGeneration,
+		window.StartDigestSeq, window.EndDigestSeq))
 	if getErr != nil && getErr != sql.ErrNoRows {
 		return TurnWindow{}, false, getErr
 	}
@@ -209,13 +210,13 @@ SET window_index = ?, start_message_seq = ?, end_message_seq = ?, turn_count = ?
     summary_text = ?, summary_hash = ?, summary_revision = ?,
     model = ?, usage_json = ?, metadata_json = ?, last_error = ?,
     updated_at = ?, processed_at = ?
-WHERE id = ?
+WHERE tenant_id = ? AND id = ?
 `, window.WindowIndex, window.StartMessageSeq, window.EndMessageSeq, window.TurnCount,
 			window.SourceHash, window.SourceRevision, string(window.Status),
 			window.SummaryText, window.SummaryHash, window.SummaryRevision,
 			nullableString(window.Model), window.UsageJSON, window.MetadataJSON,
 			nullableString(window.LastError), now.Format(time.RFC3339Nano),
-			nullableTime(window.ProcessedAt), window.ID)
+			nullableTime(window.ProcessedAt), s.tenantID(), window.ID)
 		if err != nil {
 			return TurnWindow{}, false, fmt.Errorf("memorystore: refresh turn window: %w", err)
 		}
@@ -227,13 +228,16 @@ WHERE id = ?
 	}
 	_, err = tx.ExecContext(ctx, `
 INSERT INTO memory_turn_windows (
-    id, scope, project_key, session_id, session_generation, window_index,
+    id, scope, project_key, tenant_id, scope_kind, scope_key,
+    session_id, session_generation, window_index,
     start_digest_seq, end_digest_seq, start_message_seq, end_message_seq, turn_count,
     summary_text, summary_hash, summary_revision, source_hash, source_revision,
     status, model, usage_json, metadata_json, last_error,
     created_at, updated_at, processed_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-`, window.ID, string(window.Scope), window.ProjectKey, window.SessionID, window.SessionGeneration, window.WindowIndex,
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`, window.ID, string(window.Scope), window.ProjectKey, s.tenantID(),
+		string(ScopeProject), window.ProjectKey,
+		window.SessionID, window.SessionGeneration, window.WindowIndex,
 		window.StartDigestSeq, window.EndDigestSeq, window.StartMessageSeq, window.EndMessageSeq, window.TurnCount,
 		window.SummaryText, window.SummaryHash, window.SummaryRevision, window.SourceHash, window.SourceRevision,
 		string(window.Status), nullableString(window.Model), window.UsageJSON, window.MetadataJSON,
@@ -267,8 +271,8 @@ func (s *Store) CountTurnWindowsForGeneration(ctx context.Context, sessionID str
 		return 0, err
 	}
 	var count int
-	query := `SELECT COUNT(1) FROM memory_turn_windows WHERE project_key = ? AND session_id = ?`
-	args := []interface{}{s.cfg.ProjectKey, strings.TrimSpace(sessionID)}
+	query := `SELECT COUNT(1) FROM memory_turn_windows WHERE tenant_id = ? AND project_key = ? AND session_id = ?`
+	args := []interface{}{s.tenantID(), s.cfg.ProjectKey, strings.TrimSpace(sessionID)}
 	if generation != nil {
 		query += ` AND session_generation = ?`
 		args = append(args, *generation)
@@ -302,8 +306,8 @@ func (s *Store) listTurnWindows(ctx context.Context, sessionID string, generatio
 	query := `
 	SELECT ` + turnWindowColumns + `
  FROM memory_turn_windows
- WHERE project_key = ? AND session_id = ?`
-	args := []interface{}{s.cfg.ProjectKey, strings.TrimSpace(sessionID)}
+ WHERE tenant_id = ? AND project_key = ? AND session_id = ?`
+	args := []interface{}{s.tenantID(), s.cfg.ProjectKey, strings.TrimSpace(sessionID)}
 	if generation != nil {
 		query += ` AND session_generation = ?`
 		args = append(args, *generation)
@@ -369,11 +373,11 @@ func (s *Store) completeTurnWindow(ctx context.Context, id string, generation *i
 	if err := validateMaintenanceLeaseTx(ctx, tx, s.cfg.ProjectKey); err != nil {
 		return TurnWindow{}, err
 	}
-	if err := checkTurnWindowPurgeFenceTx(ctx, tx, id); err != nil {
+	if err := checkTurnWindowPurgeFenceTx(ctx, tx, s.tenantID(), id); err != nil {
 		return TurnWindow{}, err
 	}
-	where := "id = ? AND status != 'invalidated'"
-	whereArgs := []interface{}{strings.TrimSpace(id)}
+	where := "tenant_id = ? AND id = ? AND status != 'invalidated'"
+	whereArgs := []interface{}{s.tenantID(), strings.TrimSpace(id)}
 	if generation != nil {
 		where += " AND session_generation = ?"
 		whereArgs = append(whereArgs, *generation)
@@ -438,11 +442,11 @@ func (s *Store) failTurnWindow(ctx context.Context, id string, generation *int64
 	if err := validateMaintenanceLeaseTx(ctx, tx, s.cfg.ProjectKey); err != nil {
 		return err
 	}
-	if err := checkTurnWindowPurgeFenceTx(ctx, tx, id); err != nil {
+	if err := checkTurnWindowPurgeFenceTx(ctx, tx, s.tenantID(), id); err != nil {
 		return err
 	}
-	where := "id = ? AND status != 'done' AND status != 'invalidated'"
-	args := []interface{}{nullableString(reason), now, strings.TrimSpace(id)}
+	where := "tenant_id = ? AND id = ? AND status != 'done' AND status != 'invalidated'"
+	args := []interface{}{nullableString(reason), now, s.tenantID(), strings.TrimSpace(id)}
 	if generation != nil {
 		where += " AND session_generation = ?"
 		args = append(args, *generation)
@@ -502,11 +506,11 @@ func (s *Store) markTurnWindowProcessing(ctx context.Context, id string, generat
 	if err := validateMaintenanceLeaseTx(ctx, tx, s.cfg.ProjectKey); err != nil {
 		return err
 	}
-	if err := checkTurnWindowPurgeFenceTx(ctx, tx, id); err != nil {
+	if err := checkTurnWindowPurgeFenceTx(ctx, tx, s.tenantID(), id); err != nil {
 		return err
 	}
-	where := "id = ? AND status IN ('pending', 'failed', 'processing')"
-	args := []interface{}{now, strings.TrimSpace(id)}
+	where := "tenant_id = ? AND id = ? AND status IN ('pending', 'failed', 'processing')"
+	args := []interface{}{now, s.tenantID(), strings.TrimSpace(id)}
 	if generation != nil {
 		where += " AND session_generation = ?"
 		args = append(args, *generation)
@@ -538,14 +542,14 @@ WHERE `+where, args...)
 // transition. The window row can outlive its canonical session only when it
 // has no trustworthy generation; such legacy rows must nevertheless stop being
 // mutated once any tombstone exists for the reusable session ID.
-func checkTurnWindowPurgeFenceTx(ctx context.Context, tx *sql.Tx, id string) error {
+func checkTurnWindowPurgeFenceTx(ctx context.Context, tx *sql.Tx, tenantID, id string) error {
 	var projectKey, sessionID string
 	var generation int64
 	err := tx.QueryRowContext(ctx, `
 SELECT project_key, session_id, session_generation
 FROM memory_turn_windows
-WHERE id = ?
-`, strings.TrimSpace(id)).Scan(&projectKey, &sessionID, &generation)
+WHERE tenant_id = ? AND id = ?
+`, strings.TrimSpace(tenantID), strings.TrimSpace(id)).Scan(&projectKey, &sessionID, &generation)
 	if err == sql.ErrNoRows {
 		// Preserve the existing conditional-update contract: a missing row
 		// still yields zero affected rows and sql.ErrNoRows at the caller.
@@ -554,13 +558,13 @@ WHERE id = ?
 	if err != nil {
 		return fmt.Errorf("memorystore: read turn window purge identity: %w", err)
 	}
-	return checkTurnWindowIdentityPurgeFenceTx(ctx, tx, projectKey, sessionID, generation)
+	return checkTurnWindowIdentityPurgeFenceTx(ctx, tx, tenantID, projectKey, sessionID, generation)
 }
 
 func checkTurnWindowIdentityPurgeFenceTx(
 	ctx context.Context,
 	tx *sql.Tx,
-	projectKey, sessionID string,
+	tenantID, projectKey, sessionID string,
 	generation int64,
 ) error {
 	projectKey = strings.TrimSpace(projectKey)
@@ -570,9 +574,9 @@ func checkTurnWindowIdentityPurgeFenceTx(
 			ErrSessionPurgeGenerationMismatch)
 	}
 	if generation > 0 {
-		return checkSessionPurgeGenerationTx(ctx, tx, projectKey, sessionID, generation)
+		return checkSessionPurgeGenerationTx(ctx, tx, tenantID, projectKey, sessionID, generation)
 	}
-	return checkLegacySessionPurgeFenceTx(ctx, tx, projectKey, sessionID)
+	return checkLegacySessionPurgeFenceTx(ctx, tx, tenantID, projectKey, sessionID)
 }
 
 // InvalidateTurnWindowsForSession prevents old L1 summaries from being reused
@@ -605,9 +609,9 @@ func (s *Store) invalidateTurnWindowsForSession(ctx context.Context, sessionID s
 	query := `
 UPDATE memory_turn_windows
 SET status = 'invalidated', last_error = ?, processed_at = COALESCE(processed_at, ?), updated_at = ?
-WHERE project_key = ? AND session_id = ? AND status != 'invalidated'
+WHERE tenant_id = ? AND project_key = ? AND session_id = ? AND status != 'invalidated'
 `
-	args := []interface{}{nullableString(reason), now, now, s.cfg.ProjectKey, strings.TrimSpace(sessionID)}
+	args := []interface{}{nullableString(reason), now, now, s.tenantID(), s.cfg.ProjectKey, strings.TrimSpace(sessionID)}
 	if generation != nil {
 		query += ` AND session_generation = ?`
 		args = append(args, *generation)
@@ -634,8 +638,8 @@ func (s *Store) DeleteTurnWindowsForSession(ctx context.Context, sessionID strin
 		return 0, err
 	}
 	res, err := db.ExecContext(ctx, `
-DELETE FROM memory_turn_windows WHERE project_key = ? AND session_id = ?
-`, s.cfg.ProjectKey, strings.TrimSpace(sessionID))
+DELETE FROM memory_turn_windows WHERE tenant_id = ? AND project_key = ? AND session_id = ?
+`, s.tenantID(), s.cfg.ProjectKey, strings.TrimSpace(sessionID))
 	if err != nil {
 		return 0, fmt.Errorf("memorystore: delete turn windows: %w", err)
 	}
@@ -664,8 +668,8 @@ func (s *Store) PruneTurnWindows(ctx context.Context, before time.Time) (int64, 
 	rows, err := tx.QueryContext(ctx, `
 SELECT window_seq, created_at
 FROM memory_turn_windows
-WHERE project_key = ? AND status IN ('done', 'invalidated')
-`, s.cfg.ProjectKey)
+WHERE tenant_id = ? AND project_key = ? AND status IN ('done', 'invalidated')
+`, s.tenantID(), s.cfg.ProjectKey)
 	if err != nil {
 		return 0, fmt.Errorf("memorystore: list turn windows for prune: %w", err)
 	}
@@ -699,9 +703,9 @@ WHERE project_key = ? AND status IN ('done', 'invalidated')
 		}
 		res, err := tx.ExecContext(ctx, `
 DELETE FROM memory_turn_windows
-WHERE project_key = ? AND status IN ('done', 'invalidated')
+WHERE tenant_id = ? AND project_key = ? AND status IN ('done', 'invalidated')
   AND window_seq IN (`+placeholders+`)
-`, append([]interface{}{s.cfg.ProjectKey}, args...)...)
+`, append([]interface{}{s.tenantID(), s.cfg.ProjectKey}, args...)...)
 		if err != nil {
 			return deleted, fmt.Errorf("memorystore: prune turn windows: %w", err)
 		}
@@ -734,8 +738,8 @@ func (s *Store) PurgeTurnWindows(ctx context.Context, sessionID string) (TurnWin
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 
-	digestWhere := "project_key = ? AND rollup_status = 'done' AND rollup_window_id IS NOT NULL"
-	digestArgs := []interface{}{now, s.cfg.ProjectKey}
+	digestWhere := "tenant_id = ? AND project_key = ? AND rollup_status = 'done' AND rollup_window_id IS NOT NULL"
+	digestArgs := []interface{}{now, s.tenantID(), s.cfg.ProjectKey}
 	if sessionID != "" {
 		digestWhere += " AND session_id = ?"
 		digestArgs = append(digestArgs, sessionID)
@@ -749,8 +753,8 @@ WHERE `+digestWhere, digestArgs...)
 	}
 	result.Digests, _ = res.RowsAffected()
 
-	windowWhere := "project_key = ?"
-	windowArgs := []interface{}{s.cfg.ProjectKey}
+	windowWhere := "tenant_id = ? AND project_key = ?"
+	windowArgs := []interface{}{s.tenantID(), s.cfg.ProjectKey}
 	if sessionID != "" {
 		windowWhere += " AND session_id = ?"
 		windowArgs = append(windowArgs, sessionID)
@@ -794,11 +798,11 @@ func (s *Store) markTurnWindowCandidatesStale(ctx context.Context, sessionID str
 SELECT DISTINCT e.id, e.revision
 FROM memory_entries e
 JOIN memory_sources src ON src.memory_id = e.id
-WHERE e.project_key = ? AND e.source_session_id = ? AND e.source_kind = 'turn_window'
+WHERE e.tenant_id = ? AND e.project_key = ? AND e.source_session_id = ? AND e.source_kind = 'turn_window'
   AND src.source_window = ? AND e.status IN ('candidate', 'active')
   AND e.freshness_status != 'stale'
 `
-	args := []interface{}{s.cfg.ProjectKey, sessionID, sourceWindow}
+	args := []interface{}{s.tenantID(), s.cfg.ProjectKey, sessionID, sourceWindow}
 	if generation != nil {
 		query += ` AND e.source_session_generation = ? AND src.source_session_generation = ?`
 		args = append(args, *generation, *generation)
@@ -837,8 +841,8 @@ WHERE e.project_key = ? AND e.source_session_id = ? AND e.source_kind = 'turn_wi
 		res, err := tx.ExecContext(ctx, `
 UPDATE memory_entries SET freshness_status = 'stale', stale_reason = ?,
     revision = revision + 1, updated_at = ?
- WHERE id = ? AND project_key = ? AND revision = ?
-`, reason, now.Format(time.RFC3339Nano), item.id, s.cfg.ProjectKey, item.revision)
+ WHERE id = ? AND tenant_id = ? AND project_key = ? AND revision = ?
+`, reason, now.Format(time.RFC3339Nano), item.id, s.tenantID(), s.cfg.ProjectKey, item.revision)
 		if err != nil {
 			return 0, err
 		}
@@ -852,7 +856,7 @@ UPDATE memory_entries SET freshness_status = 'stale', stale_reason = ?,
 		if err != nil {
 			return 0, err
 		}
-		if err := appendCurrentRecordVersionTx(ctx, tx, item.id, s.cfg.ProjectKey,
+		if err := s.appendCurrentRecordVersionTx(ctx, tx, item.id, s.cfg.ProjectKey,
 			"system:turn_window", reason, "update", eventID); err != nil {
 			return 0, err
 		}
@@ -876,8 +880,8 @@ func (s *Store) CountTurnWindowsByStatus(ctx context.Context, projectKey string)
 		projectKey = s.cfg.ProjectKey
 	}
 	rows, err := db.QueryContext(ctx, `
-SELECT status, COUNT(1) FROM memory_turn_windows WHERE project_key = ? GROUP BY status
-`, strings.TrimSpace(projectKey))
+SELECT status, COUNT(1) FROM memory_turn_windows WHERE tenant_id = ? AND project_key = ? GROUP BY status
+`, s.tenantID(), strings.TrimSpace(projectKey))
 	if err != nil {
 		return nil, err
 	}
@@ -907,7 +911,8 @@ func (s *Store) getTurnWindowByID(ctx context.Context, id string) (TurnWindow, e
 	if err != nil {
 		return TurnWindow{}, err
 	}
-	row := db.QueryRowContext(ctx, `SELECT `+turnWindowColumns+` FROM memory_turn_windows WHERE id = ?`, strings.TrimSpace(id))
+	row := db.QueryRowContext(ctx, `SELECT `+turnWindowColumns+` FROM memory_turn_windows WHERE tenant_id = ? AND id = ?`,
+		s.tenantID(), strings.TrimSpace(id))
 	return scanTurnWindow(row)
 }
 

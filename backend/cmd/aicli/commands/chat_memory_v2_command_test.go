@@ -310,6 +310,76 @@ func TestStructuredMemoryListAndSearchIncludeAutomaticRecordsWithSourceFilter(t 
 	}
 }
 
+func TestStructuredMemoryListAndSearchUseMultiValueKindTagFilters(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	root := t.TempDir()
+	configPath := filepath.Join(root, "runtime.yaml")
+	if err := os.WriteFile(configPath, []byte("memory:\n  mode: on\n"), 0o644); err != nil {
+		t.Fatalf("write runtime config: %v", err)
+	}
+	session := &ChatSession{WorkspaceAnchor: root, RuntimeConfigPath: configPath}
+	store, err := openChatProjectMemoryStore(session)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	manual, err := store.Append(memorystore.AppendNoteOptions{
+		Text: "shared multi value memory manual decision", Kind: "decision",
+		Tags: []string{"alpha", "beta"},
+	})
+	if err != nil {
+		t.Fatalf("append manual record: %v", err)
+	}
+
+	activateCandidate := func(key, text, kind string, tags []string) string {
+		t.Helper()
+		candidate, insertErr := store.InsertCandidate(context.Background(), memorystore.Candidate{
+			SessionID: "cli-multi-value", Kind: kind, Text: text, Tags: tags,
+			Confidence: 0.9, SourceHash: key, SourceRevision: 1,
+		})
+		if insertErr != nil {
+			t.Fatalf("insert candidate %s: %v", key, insertErr)
+		}
+		active := memorystore.StatusActive
+		record, updateErr := store.UpdateRecord(context.Background(), candidate.ID,
+			memorystore.RecordPatch{Status: &active})
+		if updateErr != nil {
+			t.Fatalf("activate candidate %s: %v", key, updateErr)
+		}
+		return record.ID
+	}
+	factBoth := activateCandidate("cli-multi-fact", "shared multi value memory automatic fact", "fact", []string{"alpha", "beta"})
+	decisionAlpha := activateCandidate("cli-multi-decision", "shared multi value memory automatic decision", "decision", []string{"alpha"})
+	if err := store.Close(); err != nil {
+		t.Fatalf("close seed store: %v", err)
+	}
+
+	run := func(command string) string {
+		t.Helper()
+		result, handled, err := tryExecuteStructuredChatCommand(session, command)
+		if err != nil || !handled {
+			t.Fatalf("%s handled=%t err=%v", command, handled, err)
+		}
+		return ui.RenderDocumentPlain(result.Document())
+	}
+
+	bothTags := run("/memory list 20 --kind decision --kind fact --tag alpha --tag beta")
+	if !strings.Contains(bothTags, manual.ID) || !strings.Contains(bothTags, factBoth) ||
+		strings.Contains(bothTags, decisionAlpha) {
+		t.Fatalf("multi-value list with all tags returned wrong records:\n%s", bothTags)
+	}
+	commaSeparated := run("/memory list 20 --kind=decision,fact --tag=alpha")
+	for _, id := range []string{manual.ID, factBoth, decisionAlpha} {
+		if !strings.Contains(commaSeparated, id) {
+			t.Fatalf("comma-separated multi-value list missing %s:\n%s", id, commaSeparated)
+		}
+	}
+	factSearch := run("/memory search shared multi value memory --kind fact --tag beta")
+	if !strings.Contains(factSearch, factBoth) ||
+		strings.Contains(factSearch, manual.ID) || strings.Contains(factSearch, decisionAlpha) {
+		t.Fatalf("multi-value search returned wrong records:\n%s", factSearch)
+	}
+}
+
 func TestMemorySourceKindLabelsAreSafeForCLIOutput(t *testing.T) {
 	if got := safeMemorySourceKindLabel("session_extract\x1b[31m secret=sk-123456789012345678901234\nnext"); strings.ContainsAny(got, "\x1b\n") {
 		t.Fatalf("unsafe source kind label = %q", got)
@@ -576,6 +646,81 @@ func TestStructuredMemoryDigestReplayPreviewRequiresBoundRuntime(t *testing.T) {
 	}
 	if rendered = ui.RenderDocumentPlain(result.Document()); !strings.Contains(rendered, "需要已绑定") {
 		t.Fatalf("unbound replay preview should fail closed:\n%s", rendered)
+	}
+}
+
+func TestStructuredMemoryDeadlineRequeue(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	root := t.TempDir()
+	configPath := filepath.Join(root, "runtime.yaml")
+	if err := os.WriteFile(configPath, []byte("memory:\n  mode: on\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	session := &ChatSession{WorkspaceAnchor: root, RuntimeConfigPath: configPath}
+	store, err := openChatProjectMemoryStore(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	makeJob := func(key string, status memorystore.JobStatus, attempt int, lastError string) memorystore.MemoryJob {
+		t.Helper()
+		job, ensureErr := store.EnsureJob(context.Background(), memorystore.MemoryJob{
+			Kind: "phase1_extract", JobKey: key, Status: status, Attempt: attempt,
+			CreatedAt: now.Add(-time.Hour), DeadlineAt: now.Add(-time.Minute),
+			LastError: lastError,
+		})
+		if ensureErr != nil {
+			t.Fatalf("ensure %s: %v", key, ensureErr)
+		}
+		return job
+	}
+	deadline0 := makeJob("deadline-0", memorystore.JobStatusFailed, 0, "job deadline exceeded")
+	deadline1 := makeJob("deadline-1", memorystore.JobStatusFailed, 1, "job deadline exceeded")
+	other := makeJob("provider-failed", memorystore.JobStatusFailed, 0, "provider failed")
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	run := func(command string) string {
+		t.Helper()
+		result, handled, runErr := tryExecuteStructuredChatCommand(session, command)
+		if runErr != nil || !handled {
+			t.Fatalf("%s handled=%t err=%v", command, handled, runErr)
+		}
+		return ui.RenderDocumentPlain(result.Document())
+	}
+	dryRun := run("/memory jobs deadline-requeue 10")
+	if !strings.Contains(dryRun, "eligible=1") || !strings.Contains(dryRun, "dry-run") {
+		t.Fatalf("dry-run output = %s", dryRun)
+	}
+	if got := run("/memory jobs deadline-requeue --apply"); !strings.Contains(got, "--yes") {
+		t.Fatalf("apply without confirmation must show usage: %s", got)
+	}
+	applied := run("/memory jobs deadline-requeue 10 --apply --yes --reason operator")
+	if !strings.Contains(applied, "requeued=1") || !strings.Contains(applied, deadline0.ID) {
+		t.Fatalf("apply output = %s", applied)
+	}
+
+	reopened, err := openChatProjectMemoryStore(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	requeued, err := reopened.GetJob(context.Background(), deadline0.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requeued.Status != memorystore.JobStatusPending || requeued.DeadlineAt.Before(time.Now().UTC()) {
+		t.Fatalf("requeued deadline job = %+v", requeued)
+	}
+	for _, id := range []string{deadline1.ID, other.ID} {
+		job, getErr := reopened.GetJob(context.Background(), id)
+		if getErr != nil {
+			t.Fatal(getErr)
+		}
+		if job.Status != memorystore.JobStatusFailed {
+			t.Fatalf("unrelated failed job %s status = %s", id, job.Status)
+		}
 	}
 }
 

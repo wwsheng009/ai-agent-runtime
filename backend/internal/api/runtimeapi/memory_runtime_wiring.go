@@ -4,14 +4,15 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
-	"github.com/wwsheng009/ai-agent-runtime/internal/memoryassembly"
 	"github.com/wwsheng009/ai-agent-runtime/internal/memoryruntime"
+	"github.com/wwsheng009/ai-agent-runtime/internal/memorytaskbridge"
 	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 )
 
@@ -28,9 +29,19 @@ func (h *Handler) SetMemoryRuntime(runtime *memoryruntime.Runtime) {
 		h.memorySessionEndCancel = nil
 		h.memorySessionEndCtx = nil
 	}
+	h.ensureMemoryRuntimeRegistryLocked()
+	if previous != nil && previous != runtime {
+		previousKey := memoryWorkspaceKey(previous.Config.Workspace)
+		if h.memoryRuntimes[previousKey] == previous {
+			delete(h.memoryRuntimes, previousKey)
+		}
+	}
 	h.memoryRuntime = runtime
 	if runtime != nil && (previous == nil || previous == runtime) {
 		h.memorySessionEndClosing = false
+	}
+	if runtime != nil {
+		h.registerMemoryRuntimeLocked(runtime, true)
 	}
 	h.memoryRuntimeMu.Unlock()
 	if cancel != nil {
@@ -123,13 +134,7 @@ func (h *Handler) SetMemoryRuntimeBootError(err error) {
 	if h == nil {
 		return
 	}
-	message := ""
-	if err != nil {
-		message = sanitizeMemoryDiagnosticText(err.Error())
-	}
-	h.memoryRuntimeMu.Lock()
-	h.memoryRuntimeBootError = message
-	h.memoryRuntimeMu.Unlock()
+	h.setMemoryRuntimeBootErrorForWorkspace(h.configuredMemoryWorkspace(), err)
 }
 
 func (h *Handler) MemoryRuntimeBootError() string {
@@ -145,7 +150,7 @@ func (h *Handler) MemoryRuntimeBootError() string {
 // session-derived memory records from being reused after compaction/backtrack
 // changed the canonical transcript. It returns an unsubscribe function.
 func (h *Handler) BindMemoryDigestInvalidation() func() {
-	if h == nil || h.MemoryRuntime() == nil {
+	if h == nil || !h.memoryV2Enabled() {
 		return nil
 	}
 	bus := h.getRuntimeEventBus()
@@ -156,9 +161,14 @@ func (h *Handler) BindMemoryDigestInvalidation() func() {
 		if strings.TrimSpace(event.SessionID) == "" {
 			return
 		}
-		runtime := h.MemoryRuntime()
+		workspace := h.memorySessionWorkspace(event.SessionID)
+		runtime := h.MemoryRuntimeForWorkspace(workspace)
 		if runtime == nil {
-			return
+			var err error
+			runtime, err = h.EnableMemoryRuntimeForWorkspace(workspace)
+			if err != nil || runtime == nil {
+				return
+			}
 		}
 		_, _ = runtime.InvalidateFromRuntimeEvent(
 			context.Background(), event.Type, event.SessionID, event.Payload)
@@ -179,34 +189,65 @@ func (h *Handler) BindMemoryDigestInvalidation() func() {
 	}
 }
 
+// BindMemoryTaskCompletionEvents maps durable team task terminal events to the
+// workspace-scoped memory runtime. The bridge persists a candidate Episode and
+// never invokes transcript extraction; promotion remains a separate policy.
+func (h *Handler) BindMemoryTaskCompletionEvents() func() {
+	if h == nil || h.sessionManager == nil || h.getTeamStore() == nil {
+		return func() {}
+	}
+	bus := h.getTeamEvents()
+	if bus == nil {
+		return func() {}
+	}
+	return memorytaskbridge.BindTeamEvents(bus, memorytaskbridge.Dependencies{
+		TeamStore: h.getTeamStore(),
+		Sessions:  h.sessionManager,
+		RuntimeForSession: func(ctx context.Context, sessionID string) (*memoryruntime.Runtime, error) {
+			workspace := h.memorySessionWorkspace(sessionID)
+			if strings.TrimSpace(workspace) == "" {
+				workspace = h.configuredMemoryWorkspace()
+			}
+			if runtime := h.MemoryRuntimeForWorkspace(workspace); runtime != nil {
+				return runtime, nil
+			}
+			return h.EnableMemoryRuntimeForWorkspace(workspace)
+		},
+		OnError: func(err error) {
+			logpkg.Warnf("memory task-completion bridge failed: %v", err)
+		},
+	})
+}
+
 // EnableMemoryRuntime constructs the M2 write path from the active runtime
 // config. mode=off returns (nil,nil) without creating memory.db.
 func (h *Handler) EnableMemoryRuntime() (*memoryruntime.Runtime, error) {
 	if h == nil || h.runtimeConfig == nil {
 		return nil, nil
 	}
-	workspace := strings.TrimSpace(h.runtimeConfig.Workspace.Root)
-	runtime, err := memoryassembly.BuildFromRuntimeConfig(memoryassembly.BuildOptions{
-		RuntimeConfig:  h.runtimeConfig,
-		Workspace:      workspace,
-		SessionManager: h.sessionManager,
-		LLMRuntime:     h.llmRuntime,
-		WorkerID:       fmt.Sprintf("runtime-server-%d", os.Getpid()),
-	})
-	if err != nil || runtime == nil {
-		return nil, err
-	}
-	h.SetMemoryRuntime(runtime)
-	return runtime, nil
+	return h.EnableMemoryRuntimeForWorkspace(h.configuredMemoryWorkspace())
 }
 
 func (h *Handler) CloseMemoryRuntime() error {
 	if h == nil {
 		return nil
 	}
+	h.memoryRuntimeBuildMu.Lock()
+	defer h.memoryRuntimeBuildMu.Unlock()
 	h.memoryRuntimeMu.Lock()
-	runtime := h.memoryRuntime
+	runtimes := make(map[*memoryruntime.Runtime]struct{}, len(h.memoryRuntimes)+1)
+	for _, runtime := range h.memoryRuntimes {
+		if runtime != nil {
+			runtimes[runtime] = struct{}{}
+		}
+	}
+	if h.memoryRuntime != nil {
+		runtimes[h.memoryRuntime] = struct{}{}
+	}
 	h.memoryRuntime = nil
+	h.memoryRuntimes = nil
+	h.memoryRuntimeBootErrors = nil
+	h.memoryRuntimeBootError = ""
 	cancel := h.memorySessionEndCancel
 	h.memorySessionEndCancel = nil
 	h.memorySessionEndCtx = nil
@@ -216,31 +257,56 @@ func (h *Handler) CloseMemoryRuntime() error {
 		cancel()
 	}
 	h.memorySessionEndWG.Wait()
-	if runtime != nil && runtime.Store != nil {
-		return runtime.Store.Close()
+	var firstErr error
+	for runtime := range runtimes {
+		if runtime.Store == nil {
+			continue
+		}
+		if err := runtime.Store.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
 	}
-	return nil
+	return firstErr
 }
 
 // RunMemoryIdleSweep is the runtime-server idle trigger. It is a no-op when
 // generation is disabled or trigger excludes idle.
 func (h *Handler) RunMemoryIdleSweep(ctx context.Context) (memoryruntime.RunResult, error) {
-	runtime := h.MemoryRuntime()
-	if runtime == nil {
-		return memoryruntime.RunResult{}, nil
-	}
+	result := memoryruntime.RunResult{Trigger: memoryruntime.TriggerIdle}
 	if h.runtimeConfig == nil {
-		return memoryruntime.RunResult{}, nil
+		return result, nil
 	}
 	generation := h.runtimeConfig.Memory.Generation
 	if !generation.Enabled {
-		return memoryruntime.RunResult{}, nil
+		return result, nil
 	}
 	trigger := strings.ToLower(strings.TrimSpace(generation.Trigger))
 	if trigger != "idle" && trigger != "both" {
-		return memoryruntime.RunResult{}, nil
+		return result, nil
 	}
-	return runtime.Run(ctx, memoryruntime.TriggerIdle)
+	runtimes := h.memoryRuntimeSnapshot()
+	if len(runtimes) == 0 {
+		return result, nil
+	}
+	var firstErr error
+	for _, workspace := range sortedMemoryRuntimeKeys(runtimes) {
+		if err := ctx.Err(); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			break
+		}
+		runtime := runtimes[workspace]
+		run, err := runtime.Run(ctx, memoryruntime.TriggerIdle)
+		mergeMemoryRunResult(&result, run)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("%s: %w", workspace, err)
+			}
+			result.Errors = append(result.Errors, fmt.Sprintf("%s: %v", workspace, err))
+		}
+	}
+	return result, firstErr
 }
 
 // TriggerMemorySessionEnd handles the session-close trigger. It intentionally
@@ -258,9 +324,21 @@ func (h *Handler) TriggerMemorySessionEnd(sessionID string) {
 	if trigger != "session_end" && trigger != "both" {
 		return
 	}
+	workspace := h.memorySessionWorkspace(sessionID)
+	runtime := h.MemoryRuntimeForWorkspace(workspace)
+	if runtime == nil {
+		var err error
+		runtime, err = h.EnableMemoryRuntimeForWorkspace(workspace)
+		if err != nil {
+			logpkg.Warnf("memory session-end runtime unavailable: session=%s error=%v", sessionID, err)
+			return
+		}
+	}
+	if runtime == nil {
+		return
+	}
 	h.memoryRuntimeMu.Lock()
-	runtime := h.memoryRuntime
-	if runtime == nil || h.memorySessionEndClosing {
+	if h.memorySessionEndClosing {
 		h.memoryRuntimeMu.Unlock()
 		return
 	}
@@ -288,19 +366,93 @@ func (h *Handler) TriggerMemorySessionEnd(sessionID string) {
 }
 
 func (h *Handler) RunMemoryConsolidation(ctx context.Context) (memoryruntime.ConsolidationResult, error) {
-	runtime := h.MemoryRuntime()
-	if runtime == nil {
-		var err error
-		runtime, err = h.EnableMemoryRuntime()
+	runtimes := h.memoryRuntimeSnapshot()
+	if len(runtimes) == 0 {
+		runtime, err := h.EnableMemoryRuntime()
 		if err != nil {
 			return memoryruntime.ConsolidationResult{}, err
 		}
+		if runtime != nil {
+			runtimes = map[string]*memoryruntime.Runtime{
+				memoryWorkspaceKey(runtime.Config.Workspace): runtime,
+			}
+		}
 	}
-	if runtime == nil || runtime.Store == nil {
+	if len(runtimes) == 0 {
 		return memoryruntime.ConsolidationResult{}, nil
 	}
-	consolidator := memoryruntime.NewConsolidator(runtime.Store, runtime.Config)
-	return consolidator.Run(ctx)
+	result := memoryruntime.ConsolidationResult{}
+	summaryIDs := make(map[string]struct{}, len(runtimes))
+	var firstErr error
+	for _, workspace := range sortedMemoryRuntimeKeys(runtimes) {
+		if err := ctx.Err(); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			break
+		}
+		runtime := runtimes[workspace]
+		if runtime == nil || runtime.Store == nil {
+			continue
+		}
+		run, err := memoryruntime.NewConsolidator(runtime.Store, runtime.Config).Run(ctx)
+		mergeMemoryConsolidationResult(&result, run)
+		if run.SummaryID != "" {
+			summaryIDs[run.SummaryID] = struct{}{}
+		}
+		if err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("%s: %w", workspace, err)
+			}
+		}
+	}
+	if len(summaryIDs) != 1 {
+		result.SummaryID = ""
+		result.Revision = 0
+		result.SummaryText = ""
+		result.SummaryModel = ""
+	}
+	return result, firstErr
+}
+
+func sortedMemoryRuntimeKeys(runtimes map[string]*memoryruntime.Runtime) []string {
+	keys := make([]string, 0, len(runtimes))
+	for key := range runtimes {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func mergeMemoryRunResult(dst *memoryruntime.RunResult, src memoryruntime.RunResult) {
+	if src.Trigger != "" {
+		dst.Trigger = src.Trigger
+	}
+	dst.Sessions += src.Sessions
+	dst.Processed += src.Processed
+	dst.Skipped += src.Skipped
+	dst.Candidates += src.Candidates
+	dst.Stale += src.Stale
+	dst.Failed += src.Failed
+	dst.RolledUp += src.RolledUp
+	dst.RollupFailed += src.RollupFailed
+	dst.Ignored = append(dst.Ignored, src.Ignored...)
+	dst.Errors = append(dst.Errors, src.Errors...)
+}
+
+func mergeMemoryConsolidationResult(dst *memoryruntime.ConsolidationResult, src memoryruntime.ConsolidationResult) {
+	dst.Promoted += src.Promoted
+	dst.Superseded += src.Superseded
+	dst.TokenCount += src.TokenCount
+	dst.Rebuilt += src.Rebuilt
+	dst.RebuildJobs += src.RebuildJobs
+	dst.OpenQuestions += src.OpenQuestions
+	if dst.SummaryID == "" && src.SummaryID != "" {
+		dst.SummaryID = src.SummaryID
+		dst.Revision = src.Revision
+		dst.SummaryText = src.SummaryText
+		dst.SummaryModel = src.SummaryModel
+	}
 }
 
 func (h *Handler) RunMemoryConsolidationForWorkspace(ctx context.Context, workspace string) (memoryruntime.ConsolidationResult, error) {

@@ -1776,6 +1776,9 @@ func normalizeSkillsRuntimeConfig(cfg *config.Config) *config.SkillsRuntimeConfi
 	if len(cfg.SkillsRuntime.ProjectHeaders) == 0 {
 		cfg.SkillsRuntime.ProjectHeaders = []string{"X-Skills-Project", "X-Skills-Auth-Project", "X-Project-ID", "X-Authenticated-Project"}
 	}
+	if len(cfg.SkillsRuntime.WorkspaceHeaders) == 0 {
+		cfg.SkillsRuntime.WorkspaceHeaders = []string{"X-Skills-Workspace", "X-Skills-Auth-Workspace", "X-Workspace-ID", "X-Authenticated-Workspace"}
+	}
 	if len(cfg.SkillsRuntime.UserHeaders) == 0 {
 		cfg.SkillsRuntime.UserHeaders = []string{"X-Skills-User", "X-Skills-Auth-User", "X-User-ID", "X-Authenticated-User"}
 	}
@@ -1787,6 +1790,9 @@ func normalizeSkillsRuntimeConfig(cfg *config.Config) *config.SkillsRuntimeConfi
 	}
 	if len(cfg.SkillsRuntime.ProjectClaims) == 0 {
 		cfg.SkillsRuntime.ProjectClaims = []string{"project_id", "project", "pid"}
+	}
+	if len(cfg.SkillsRuntime.WorkspaceClaims) == 0 {
+		cfg.SkillsRuntime.WorkspaceClaims = []string{"workspace_id", "workspace", "wid"}
 	}
 	if len(cfg.SkillsRuntime.UserClaims) == 0 {
 		cfg.SkillsRuntime.UserClaims = []string{"user_id", "user", "uid", "sub"}
@@ -2017,12 +2023,14 @@ func buildSkillsScopeResolverConfig(cfg *config.SkillsRuntimeConfig) runtimeapi.
 		Enabled:          cfg.ScopeResolverEnabled,
 		TenantHeaders:    append([]string(nil), cfg.TenantHeaders...),
 		ProjectHeaders:   append([]string(nil), cfg.ProjectHeaders...),
+		WorkspaceHeaders: append([]string(nil), cfg.WorkspaceHeaders...),
 		UserHeaders:      append([]string(nil), cfg.UserHeaders...),
 		RoleHeaders:      append([]string(nil), cfg.RoleHeaders...),
 		JWTClaimsEnabled: cfg.JWTClaimsEnabled,
 		JWTSecret:        strings.TrimSpace(cfg.JWTSecret),
 		TenantClaims:     append([]string(nil), cfg.TenantClaims...),
 		ProjectClaims:    append([]string(nil), cfg.ProjectClaims...),
+		WorkspaceClaims:  append([]string(nil), cfg.WorkspaceClaims...),
 		UserClaims:       append([]string(nil), cfg.UserClaims...),
 		RoleClaims:       append([]string(nil), cfg.RoleClaims...),
 		AdminRoles:       append([]string(nil), cfg.AdminRoles...),
@@ -2208,9 +2216,10 @@ func buildSkillsScopeBindings(configured map[string]config.SkillsRuntimeScopeBin
 	bindings := make(map[string]runtimeapi.UsageScope, len(configured))
 	for key, value := range configured {
 		bindings[key] = runtimeapi.UsageScope{
-			TenantID:  value.TenantID,
-			ProjectID: value.ProjectID,
-			UserID:    value.UserID,
+			TenantID:    value.TenantID,
+			ProjectID:   value.ProjectID,
+			WorkspaceID: value.WorkspaceID,
+			UserID:      value.UserID,
 		}
 	}
 	return bindings

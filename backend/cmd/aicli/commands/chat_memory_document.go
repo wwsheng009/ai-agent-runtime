@@ -195,18 +195,31 @@ func buildChatMemoryAddDocument(note memorystore.Note) render.Document {
 	})
 }
 
+func chatMemoryNotesFromSearchHits(hits []memorystore.RecordSearchHit) []memorystore.Note {
+	notes := make([]memorystore.Note, 0, len(hits))
+	for _, hit := range hits {
+		record := hit.Record
+		notes = append(notes, memorystore.Note{
+			ID: record.ID, Text: record.Text, Title: record.Title, Summary: record.Summary,
+			Tags: append([]string(nil), record.Tags...), Source: record.SourceKind,
+			SessionID: record.SourceSessionID, CreatedAt: record.CreatedAt,
+		})
+	}
+	return notes
+}
+
 // buildChatMemoryListDocument renders /memory list output. An empty store
 // renders the legacy hint line as the successful result of the operation.
-// sourceKinds is optional so existing render callers keep their output while
-// filtered CLI requests can make the selected provenance explicit.
-func buildChatMemoryListDocument(notes []memorystore.Note, limit int, root string, sourceKinds ...string) render.Document {
+// filterLabel is optional so callers that need a uniform selected-filter line
+// can make it explicit without duplicating renderer logic.
+func buildChatMemoryListDocument(notes []memorystore.Note, limit int, root string, filterLabels ...string) render.Document {
 	if len(notes) == 0 {
 		return render.SingleLineDoc(render.TextSpan("项目记忆为空。使用 /memory add <text> 写入。"))
 	}
 	title := fmt.Sprintf("最近 %d 条项目记忆（root=%s）:", len(notes), root)
-	if len(sourceKinds) > 0 && strings.TrimSpace(sourceKinds[0]) != "" {
-		title = fmt.Sprintf("最近 %d 条项目记忆（source_kind=%s root=%s）:",
-			len(notes), safeMemorySourceKindLabel(sourceKinds[0]), root)
+	if len(filterLabels) > 0 && strings.TrimSpace(filterLabels[0]) != "" {
+		title = fmt.Sprintf("最近 %d 条项目记忆（%s root=%s）:",
+			len(notes), filterLabels[0], root)
 	}
 	lines := []string{title}
 	for i, note := range notes {
@@ -227,14 +240,14 @@ func buildChatMemoryListDocument(notes []memorystore.Note, limit int, root strin
 
 // buildChatMemorySearchDocument renders /memory search output. A zero-hit
 // search renders the legacy "未找到" line as the successful result.
-func buildChatMemorySearchDocument(hits []memorystore.RecordSearchHit, query string, sourceKinds ...string) render.Document {
+func buildChatMemorySearchDocument(hits []memorystore.RecordSearchHit, query string, filterLabels ...string) render.Document {
 	if len(hits) == 0 {
 		return render.SingleLineDoc(render.TextSpan(fmt.Sprintf("未找到与 %q 匹配的项目记忆。", query)))
 	}
 	title := fmt.Sprintf("项目记忆搜索 %q → %d 条:", query, len(hits))
-	if len(sourceKinds) > 0 && strings.TrimSpace(sourceKinds[0]) != "" {
-		title = fmt.Sprintf("项目记忆搜索 %q（source_kind=%s）→ %d 条:",
-			query, safeMemorySourceKindLabel(sourceKinds[0]), len(hits))
+	if len(filterLabels) > 0 && strings.TrimSpace(filterLabels[0]) != "" {
+		title = fmt.Sprintf("项目记忆搜索 %q（%s）→ %d 条:",
+			query, filterLabels[0], len(hits))
 	}
 	lines := []string{title}
 	for i, hit := range hits {
@@ -571,6 +584,33 @@ func buildChatMemoryJobDeadlineRepairDocument(result memorystore.JobDeadlineRepa
 			line += " reason=" + item.Reason
 		}
 		lines = append(lines, line)
+	}
+	return textLinesDocument(lines)
+}
+
+func buildChatMemoryJobDeadlineRequeueDocument(
+	jobs []memorystore.JobDiagnostic, applied bool, requeued, failed int,
+) render.Document {
+	mode := "dry-run"
+	if applied {
+		mode = "applied"
+	}
+	lines := []string{
+		fmt.Sprintf("memory job deadline requeue (%s): eligible=%d requeued=%d failed=%d",
+			mode, len(jobs), requeued, failed),
+	}
+	for _, job := range jobs {
+		outcome := "planned"
+		if applied {
+			outcome = "requeued"
+		}
+		lines = append(lines, fmt.Sprintf(
+			"  id=%s kind=%s attempt=%d outcome=%s last_error=present",
+			job.ID, job.Kind, job.Attempt, outcome,
+		))
+	}
+	if !applied && len(jobs) > 0 {
+		lines = append(lines, "dry-run: no jobs changed; re-run with --apply --yes to requeue")
 	}
 	return textLinesDocument(lines)
 }

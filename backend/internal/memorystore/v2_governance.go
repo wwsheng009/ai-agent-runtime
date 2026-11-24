@@ -80,7 +80,7 @@ WHERE id = ? AND `+scopePredicate+` AND revision = ? AND status = 'active'
 	if err != nil {
 		return Record{}, err
 	}
-	if err := appendCurrentRecordVersionTx(ctx, tx, record.ID, record.ProjectKey,
+	if err := s.appendCurrentRecordVersionTx(ctx, tx, record.ID, record.ProjectKey,
 		"admin", "explicit revalidation", "update", eventID); err != nil {
 		return Record{}, err
 	}
@@ -143,8 +143,8 @@ WHERE id = ? AND `+scopePredicate+` AND revision = ? AND status = 'deleted'
 	}
 	if _, err := tx.ExecContext(ctx, `
 DELETE FROM memory_suppressions
-WHERE source_memory_id = ? AND project_key = ? AND reason = 'deleted'
-`, record.ID, s.cfg.ProjectKey); err != nil {
+WHERE source_memory_id = ? AND tenant_id = ? AND project_key = ? AND reason = 'deleted'
+`, record.ID, s.tenantID(), s.cfg.ProjectKey); err != nil {
 		return Record{}, err
 	}
 	eventID, err := insertEventIDTx(ctx, tx, record.ProjectKey, record.ID, "restored", "admin", record.SourceSessionID, record.Revision+1, map[string]interface{}{
@@ -153,7 +153,7 @@ WHERE source_memory_id = ? AND project_key = ? AND reason = 'deleted'
 	if err != nil {
 		return Record{}, err
 	}
-	if err := appendCurrentRecordVersionTx(ctx, tx, record.ID, record.ProjectKey,
+	if err := s.appendCurrentRecordVersionTx(ctx, tx, record.ID, record.ProjectKey,
 		"admin", "explicit restore", "restore", eventID); err != nil {
 		return Record{}, err
 	}
@@ -176,8 +176,8 @@ SELECT id, scope, project_key, summary_kind, revision, status, freshness_status,
        summary, summary_tokens, source_count, input_watermark, generated_at,
        model, content_hash, record_ids_json, metadata_json
 FROM memory_summaries
-WHERE id = ? AND project_key = ?
-`, id, s.cfg.ProjectKey)
+WHERE id = ? AND tenant_id = ? AND project_key = ? AND scope_kind = 'project' AND scope_key = ?
+`, id, s.tenantID(), s.cfg.ProjectKey, s.cfg.ProjectKey)
 	return scanSummary(row)
 }
 
@@ -207,14 +207,15 @@ func (s *Store) ActivateSummary(ctx context.Context, id string) (Summary, error)
 	}
 	if _, err := tx.ExecContext(ctx, `
 UPDATE memory_summaries SET status = 'superseded'
-WHERE scope = ? AND project_key = ? AND summary_kind = ? AND status = 'active'
-`, string(summary.Scope), summary.ProjectKey, summary.SummaryKind); err != nil {
+WHERE tenant_id = ? AND scope = ? AND project_key = ? AND scope_kind = 'project' AND scope_key = ?
+  AND summary_kind = ? AND status = 'active'
+`, s.tenantID(), string(summary.Scope), summary.ProjectKey, summary.ProjectKey, summary.SummaryKind); err != nil {
 		return Summary{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `
 UPDATE memory_summaries SET status = 'active', freshness_status = 'fresh'
-WHERE id = ? AND project_key = ?
-`, summary.ID, s.cfg.ProjectKey); err != nil {
+WHERE id = ? AND tenant_id = ? AND project_key = ? AND scope_kind = 'project' AND scope_key = ?
+`, summary.ID, s.tenantID(), s.cfg.ProjectKey, s.cfg.ProjectKey); err != nil {
 		return Summary{}, err
 	}
 	if err := insertEventTx(ctx, tx, summary.ProjectKey, summary.ID, "summary_activated", "admin", "", summary.Revision, map[string]interface{}{
@@ -259,11 +260,11 @@ func (s *Store) SweepFreshnessBatch(ctx context.Context, now time.Time, limit in
 	query := `
 	SELECT id, COALESCE(source_session_id, ''), revision
 FROM memory_entries
-WHERE project_key = ? AND status = 'active' AND freshness_status = 'fresh'
+WHERE tenant_id = ? AND project_key = ? AND status = 'active' AND freshness_status = 'fresh'
   AND revalidate_after IS NOT NULL AND revalidate_after != '' AND revalidate_after <= ?
 ORDER BY revalidate_after ASC, id ASC
 `
-	args := []interface{}{s.cfg.ProjectKey, now.Format(time.RFC3339Nano)}
+	args := []interface{}{s.tenantID(), s.cfg.ProjectKey, now.Format(time.RFC3339Nano)}
 	if limit > 0 {
 		query += "LIMIT ?"
 		args = append(args, limit)
@@ -294,8 +295,8 @@ ORDER BY revalidate_after ASC, id ASC
 UPDATE memory_entries
 SET freshness_status = 'stale', stale_reason = 'revalidate_due',
     revision = revision + 1, updated_at = ?
-WHERE id = ? AND project_key = ?
-`, now.Format(time.RFC3339Nano), item.id, s.cfg.ProjectKey)
+WHERE id = ? AND tenant_id = ? AND project_key = ?
+`, now.Format(time.RFC3339Nano), item.id, s.tenantID(), s.cfg.ProjectKey)
 		if err != nil {
 			return 0, err
 		}
@@ -308,7 +309,7 @@ WHERE id = ? AND project_key = ?
 		if err != nil {
 			return 0, err
 		}
-		if err := appendCurrentRecordVersionTx(ctx, tx, item.id, s.cfg.ProjectKey,
+		if err := s.appendCurrentRecordVersionTx(ctx, tx, item.id, s.cfg.ProjectKey,
 			"system:memory_freshness", "revalidate due", "update", eventID); err != nil {
 			return 0, err
 		}
@@ -337,12 +338,17 @@ func (s *Store) ListEvents(ctx context.Context, limit int) ([]AuditEvent, error)
 SELECT id, memory_id, event_type, actor, COALESCE(session_id, ''),
        revision, payload_json, created_at
 FROM memory_events
-WHERE project_key = ?
-   OR (project_key = '' AND (
-        memory_id IN (SELECT id FROM memory_entries WHERE project_key = ?)
-        OR memory_id IN (SELECT id FROM memory_summaries WHERE project_key = ?)))
+WHERE (
+    (tenant_id = ? AND project_key = ?)
+    OR (
+        tenant_id = '' AND (
+            memory_id IN (SELECT id FROM memory_entries WHERE tenant_id = ? AND project_key = ?)
+            OR memory_id IN (SELECT id FROM memory_summaries WHERE tenant_id = ? AND project_key = ?)
+        )
+    )
+)
 ORDER BY created_at DESC LIMIT ?
-`, s.cfg.ProjectKey, s.cfg.ProjectKey, s.cfg.ProjectKey, limit)
+`, s.tenantID(), s.cfg.ProjectKey, s.tenantID(), s.cfg.ProjectKey, s.tenantID(), s.cfg.ProjectKey, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -389,7 +395,8 @@ SELECT id, scope, project_key, kind, status, text, normalized_text, tags_json,
        created_at, updated_at, last_used_at, use_count, valid_from, valid_until,
        freshness_status, last_verified_at, revalidate_after, stale_reason,
        deleted_at, metadata_json, title, summary, canonical_id, superseded_by, archived,
-       tenant_id, owner_id, agent_id, task_id, scope_kind, scope_key
+       tenant_id, owner_id, agent_id, task_id, scope_kind, scope_key,
+       trust_level, trust_reason, trusted_at, feedback_score
  FROM memory_entries WHERE `+scopePredicate+` ORDER BY created_at
 `, entryArgs...)
 	if err != nil {
@@ -475,7 +482,8 @@ SELECT id, scope, project_key, kind, status, text, normalized_text, tags_json,
        created_at, updated_at, last_used_at, use_count, valid_from, valid_until,
        freshness_status, last_verified_at, revalidate_after, stale_reason,
        deleted_at, metadata_json, title, summary, canonical_id, superseded_by, archived,
-       tenant_id, owner_id, agent_id, task_id, scope_kind, scope_key
+       tenant_id, owner_id, agent_id, task_id, scope_kind, scope_key,
+       trust_level, trust_reason, trusted_at, feedback_score
  FROM memory_entries WHERE `+scopePredicate+` ORDER BY created_at, id
 `, scopeArgs...)
 	if err != nil {
@@ -519,6 +527,7 @@ func (s *Store) Reset(ctx context.Context) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 	projectKey := s.cfg.ProjectKey
+	tenantID := s.tenantID()
 	if err := validateMaintenanceLeaseTx(ctx, tx, projectKey); err != nil {
 		return err
 	}
@@ -527,36 +536,48 @@ func (s *Store) Reset(ctx context.Context) error {
 		args  []interface{}
 	}{
 		{`DELETE FROM memory_summary_items
-		  WHERE summary_id IN (SELECT id FROM memory_summaries WHERE project_key = ?)`, []interface{}{projectKey}},
+		  WHERE summary_id IN (
+		      SELECT id FROM memory_summaries WHERE tenant_id = ? AND project_key = ?
+		  )`, []interface{}{tenantID, projectKey}},
 		{`DELETE FROM memory_usage
-		  WHERE project_key = ?
-		     OR memory_id IN (SELECT id FROM memory_entries WHERE project_key = ?)`, []interface{}{projectKey, projectKey}},
+		  WHERE (tenant_id = ? AND project_key = ?)
+		     OR memory_id IN (
+		         SELECT id FROM memory_entries WHERE tenant_id = ? AND project_key = ?
+		     )`, []interface{}{tenantID, projectKey, tenantID, projectKey}},
 		{`DELETE FROM memory_core_usage
-		  WHERE project_key = ?`, []interface{}{projectKey}},
-		{`DELETE FROM memory_recall_traces WHERE project_key = ?`, []interface{}{projectKey}},
-		{`DELETE FROM memory_suppressions WHERE project_key = ?`, []interface{}{projectKey}},
+		  WHERE tenant_id = ? AND project_key = ?`, []interface{}{tenantID, projectKey}},
+		{`DELETE FROM memory_recall_traces WHERE tenant_id = ? AND project_key = ?`, []interface{}{tenantID, projectKey}},
+		{`DELETE FROM memory_suppressions WHERE tenant_id = ? AND project_key = ?`, []interface{}{tenantID, projectKey}},
 		{`DELETE FROM memory_session_modes WHERE project_key = ?`, []interface{}{projectKey}},
-		{`DELETE FROM memory_jobs WHERE project_key = ?`, []interface{}{projectKey}},
-		{`DELETE FROM memory_turn_windows WHERE project_key = ?`, []interface{}{projectKey}},
-		{`DELETE FROM memory_turn_digests WHERE project_key = ?`, []interface{}{projectKey}},
+		{`DELETE FROM memory_jobs WHERE tenant_id = ? AND project_key = ?`, []interface{}{tenantID, projectKey}},
+		{`DELETE FROM memory_turn_windows WHERE tenant_id = ? AND project_key = ?`, []interface{}{s.tenantID(), projectKey}},
+		{`DELETE FROM memory_turn_digests WHERE tenant_id = ? AND project_key = ?`, []interface{}{s.tenantID(), projectKey}},
 		{`DELETE FROM memory_runtime_metrics WHERE project_key = ?`, []interface{}{projectKey}},
 		{`DELETE FROM memory_sources
-		  WHERE memory_id IN (SELECT id FROM memory_entries WHERE project_key = ?)`, []interface{}{projectKey}},
+		  WHERE memory_id IN (
+		      SELECT id FROM memory_entries WHERE tenant_id = ? AND project_key = ?
+		  )`, []interface{}{tenantID, projectKey}},
 		{`DELETE FROM memory_events
-		  WHERE project_key = ?
-		     OR memory_id IN (SELECT id FROM memory_entries WHERE project_key = ?)
-		     OR memory_id IN (SELECT id FROM memory_summaries WHERE project_key = ?)`, []interface{}{projectKey, projectKey, projectKey}},
-		{`DELETE FROM memory_summaries WHERE project_key = ?`, []interface{}{projectKey}},
+		  WHERE (tenant_id = ? AND project_key = ?)
+		     OR memory_id IN (
+		         SELECT id FROM memory_entries WHERE tenant_id = ? AND project_key = ?
+		     )
+		     OR memory_id IN (
+		         SELECT id FROM memory_summaries WHERE tenant_id = ? AND project_key = ?
+		     )`, []interface{}{tenantID, projectKey, tenantID, projectKey, tenantID, projectKey}},
+		{`DELETE FROM memory_summaries WHERE tenant_id = ? AND project_key = ?`, []interface{}{tenantID, projectKey}},
 	}
 	for _, statement := range statements {
 		if _, err := tx.ExecContext(ctx, statement.query, statement.args...); err != nil {
 			return err
 		}
 	}
-	if err := purgeRecordVersionsForProjectTx(ctx, tx, projectKey); err != nil {
+	if err := purgeRecordVersionsTx(ctx, tx, projectKey, `
+DELETE FROM memory_versions WHERE tenant_id = ? AND project_key = ?
+`, tenantID, projectKey); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_entries WHERE project_key = ?`, projectKey); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_entries WHERE tenant_id = ? AND project_key = ?`, tenantID, projectKey); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
